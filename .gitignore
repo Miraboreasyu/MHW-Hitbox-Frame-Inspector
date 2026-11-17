@@ -1,0 +1,17 @@
+# Build outputs & intermediates
+build/
+out/
+*.obj
+*.pdb
+*.ipdb
+*.iobj
+*.exp
+*.lib
+*.dll
+*.exe
+*.zip
+*.log
+
+# IDE / Editor directories
+.vs/
+.vscode/
