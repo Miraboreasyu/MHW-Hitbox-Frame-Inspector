@@ -1,173 +1,367 @@
 #include "hook.h"
 
 #include <windows.h>
-#include <cstdio>
+#include <intrin.h>
 #include <cstring>
 #include <mutex>
 
 namespace hook {
 namespace {
 
-struct SavedPatch {
-    std::uintptr_t site = 0;
-    std::size_t len = 0;
-    std::uint8_t orig[16]{};
+constexpr std::size_t kCodeArenaSize = 0x1000; // Single 4 KB PAGE_EXECUTE_READ page
+
+struct PermanentHookInfo {
+    bool           valid = false;
+    bool           active = false;
+    std::uintptr_t site  = 0;
+    std::uintptr_t relay = 0;
+    std::uint8_t   orig5[5]{};
 };
 
-std::uintptr_t g_arena = 0;
-std::size_t g_arenaSize = 0;
-std::size_t g_arenaUsed = 0;
-SavedPatch g_patches[16]{};
-std::size_t g_patchCount = 0;
-std::mutex g_mx;
+struct DynHook5Info {
+    bool           prepared = false;
+    bool           enabled  = false;
+    bool           wasChained = false;
+    std::uintptr_t site     = 0;
+    std::uint8_t   orig5[5]{};
+    std::uint8_t   jmp5[5]{};
+};
 
-bool InRel32(std::uintptr_t from, std::uintptr_t to) {
-    const std::int64_t d = (std::int64_t)to - (std::int64_t)from;
+struct LazyHookInfo {
+    bool           prepared  = false;
+    bool           installed = false;
+    std::uintptr_t site      = 0;
+    std::size_t    len       = 0;
+    std::uintptr_t relay     = 0;
+    std::uint8_t   orig[16]{};
+};
+
+std::uintptr_t    g_codeArena = 0;
+std::size_t       g_codeUsed  = 0;
+bool              g_sealed    = false;
+PermanentHookInfo g_presentHook{};
+DynHook5Info      g_dynHooks[kDynCount]{};
+LazyHookInfo      g_lazyGuard{};
+std::mutex        g_mx;
+
+bool InRel32(std::uintptr_t from, std::uintptr_t to) noexcept {
+    const std::int64_t d = static_cast<std::int64_t>(to) - static_cast<std::int64_t>(from);
     return d >= INT32_MIN && d <= INT32_MAX;
 }
 
-std::uintptr_t TryAllocAt(std::uintptr_t addr, std::size_t size) {
+std::uintptr_t TryAllocReadWriteAt(std::uintptr_t addr, std::size_t size) noexcept {
     void* p = ::VirtualAlloc(reinterpret_cast<void*>(addr), size,
-                             MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+                             MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
     return reinterpret_cast<std::uintptr_t>(p);
 }
 
-void RecordPatch(std::uintptr_t site, std::size_t len) {
-    std::lock_guard<std::mutex> lk(g_mx);
-    if (g_patchCount >= 16 || len > 16) return;
-    SavedPatch& sp = g_patches[g_patchCount++];
-    sp.site = site;
-    sp.len = len;
-    std::memcpy(sp.orig, reinterpret_cast<const void*>(site), len);
-}
-
-} // namespace
-
-bool InitArena(std::uintptr_t lo, std::uintptr_t hi, std::size_t size) {
-    std::lock_guard<std::mutex> lk(g_mx);
-    if (g_arena) return true;
-    SYSTEM_INFO si{};
-    ::GetSystemInfo(&si);
-    const std::uintptr_t gran = si.dwAllocationGranularity;
-
-    const std::uintptr_t span = 0x7F000000;
-    for (std::uintptr_t a = (lo - gran) & ~(gran - 1); a > gran && lo - a < span; a -= gran) {
-        if (!InRel32(a, hi) || !InRel32(a + size, lo)) continue;
-        if (std::uintptr_t p = TryAllocAt(a, size)) { g_arena = p; break; }
+bool AtomicSwap5BytesAligned(std::uintptr_t site, const std::uint8_t fiveBytes[5]) noexcept {
+    if ((site & 0x7ULL) != 0) return false; // Guaranteed 8B-aligned (0x...290, 0x...F50, 0x...7C0)
+    DWORD oldProt = 0;
+    if (!::VirtualProtect(reinterpret_cast<void*>(site), 8, PAGE_EXECUTE_READWRITE, &oldProt)) {
+        return false;
     }
-    if (!g_arena) {
-        for (std::uintptr_t a = (hi + gran) & ~(gran - 1); a - hi < span; a += gran) {
-            if (!InRel32(lo, a + size)) break;
-            if (std::uintptr_t p = TryAllocAt(a, size)) { g_arena = p; break; }
-        }
+    auto* qwordPtr = reinterpret_cast<volatile LONG64*>(site);
+    LONG64 cur = *qwordPtr;
+    for (;;) {
+        LONG64 desired = cur;
+        std::memcpy(&desired, fiveBytes, 5); // Bytes [5..7] preserved verbatim!
+        const LONG64 prev = _InterlockedCompareExchange64(qwordPtr, desired, cur);
+        if (prev == cur) break;
+        cur = prev;
     }
-    if (!g_arena) {
-        for (int i = 0; i < 64 && !g_arena; ++i) {
-            void* p = ::VirtualAlloc(nullptr, size, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
-            if (!p) break;
-            const std::uintptr_t a = reinterpret_cast<std::uintptr_t>(p);
-            if (InRel32(a, hi) && InRel32(a + size, lo)) g_arena = a;
-            else ::VirtualFree(p, 0, MEM_RELEASE);
-        }
-    }
-    if (!g_arena) return false;
-    g_arenaSize = size;
-    g_arenaUsed = 0;
-    std::memset(reinterpret_cast<void*>(g_arena), 0xCC, size);
+    DWORD tmp = 0;
+    ::VirtualProtect(reinterpret_cast<void*>(site), 8, oldProt, &tmp);
+    ::FlushInstructionCache(::GetCurrentProcess(), reinterpret_cast<void*>(site), 8);
     return true;
 }
 
-std::uintptr_t ArenaBase() { return g_arena; }
-
-std::uintptr_t Commit(const Emitter& e) {
-    std::lock_guard<std::mutex> lk(g_mx);
-    if (!g_arena) return 0;
-    const std::size_t at = (g_arenaUsed + 15) & ~std::size_t(15);
-    if (at + e.size() > g_arenaSize) return 0;
-    std::memcpy(reinterpret_cast<void*>(g_arena + at), e.bytes().data(), e.size());
-    g_arenaUsed = at + e.size();
-    ::FlushInstructionCache(::GetCurrentProcess(), reinterpret_cast<void*>(g_arena + at), e.size());
-    return g_arena + at;
-}
-
-bool WriteMem(std::uintptr_t addr, const void* bytes, std::size_t n) {
-    DWORD old = 0;
-    if (!::VirtualProtect(reinterpret_cast<void*>(addr), n, PAGE_EXECUTE_READWRITE, &old)) return false;
+bool WriteBytes(std::uintptr_t addr, const void* bytes, std::size_t n) noexcept {
+    DWORD oldProt = 0;
+    if (!::VirtualProtect(reinterpret_cast<void*>(addr), n, PAGE_EXECUTE_READWRITE, &oldProt)) {
+        return false;
+    }
     std::memcpy(reinterpret_cast<void*>(addr), bytes, n);
     DWORD tmp = 0;
-    ::VirtualProtect(reinterpret_cast<void*>(addr), n, old, &tmp);
+    ::VirtualProtect(reinterpret_cast<void*>(addr), n, oldProt, &tmp);
     ::FlushInstructionCache(::GetCurrentProcess(), reinterpret_cast<void*>(addr), n);
     return true;
 }
 
-bool PatchJump(std::uintptr_t site, std::size_t len, std::uintptr_t stub) {
-    if (len < 5 || len > 16 || !stub || !InRel32(site + 5, stub)) return false;
-    RecordPatch(site, len);
-    std::uint8_t p[16];
+bool EmitRelayAndTrampoline(std::uintptr_t site,
+                            std::size_t len,
+                            void* detourFn,
+                            const std::uint8_t* displaced,
+                            std::size_t dlen,
+                            std::uintptr_t& outRelay,
+                            void** outOrigTrampoline,
+                            bool& outWasChained) {
+    const std::size_t alignedOff = (g_codeUsed + 63U) & ~std::size_t(63U);
+    if (alignedOff + 64U > kCodeArenaSize) return false;
+
+    const std::uintptr_t base = g_codeArena + alignedOff;
+    if (!InRel32(site + 5U, base)) return false;
+
+    auto* out = reinterpret_cast<std::uint8_t*>(base);
+
+    // [0..13] Relay: jmp qword ptr [rip + 0] + u64 detourFn
+    out[0] = 0xFF; out[1] = 0x25;
+    out[2] = 0x00; out[3] = 0x00; out[4] = 0x00; out[5] = 0x00;
+    const auto fnAddr = reinterpret_cast<std::uint64_t>(detourFn);
+    std::memcpy(out + 6, &fnAddr, 8);
+
+    // [16..] origTramp (16-byte aligned!)
+    const std::uintptr_t trampAddr = base + 16U;
+    auto* tramp = out + 16U;
+
+    const auto* curSite = reinterpret_cast<const std::uint8_t*>(site);
+    if (curSite[0] == 0xE9 && len >= 5U) {
+        // Chain cleanly if another plugin (e.g. debug_tas.dll) already hooked this site
+        outWasChained = true;
+        std::int32_t prevRel = 0;
+        std::memcpy(&prevRel, curSite + 1, 4);
+        const auto prevTarget = static_cast<std::uintptr_t>(
+            static_cast<std::int64_t>(site + 5U) + prevRel);
+        if (!InRel32(trampAddr + 5U, prevTarget)) return false;
+
+        tramp[0] = 0xE9;
+        const auto chainRel = static_cast<std::int32_t>(
+            static_cast<std::int64_t>(prevTarget) - static_cast<std::int64_t>(trampAddr + 5U));
+        std::memcpy(tramp + 1, &chainRel, 4);
+        g_codeUsed = alignedOff + 24U;
+    } else {
+        outWasChained = false;
+        const std::uintptr_t backNext = trampAddr + dlen + 5U;
+        if (!InRel32(backNext, site + len)) return false;
+
+        std::memcpy(tramp, displaced, dlen);
+        tramp[dlen] = 0xE9;
+        const auto backRel = static_cast<std::int32_t>(
+            static_cast<std::int64_t>(site + len) - static_cast<std::int64_t>(backNext));
+        std::memcpy(tramp + dlen + 1U, &backRel, 4);
+        g_codeUsed = alignedOff + 16U + dlen + 5U;
+    }
+
+    outRelay           = base;
+    *outOrigTrampoline = reinterpret_cast<void*>(trampAddr);
+    return true;
+}
+
+} // namespace
+
+bool InitArena(std::uintptr_t lo, std::uintptr_t hi) {
+    std::lock_guard<std::mutex> lk(g_mx);
+    if (g_codeArena) return true;
+
+    SYSTEM_INFO si{};
+    ::GetSystemInfo(&si);
+    const std::uintptr_t gran = si.dwAllocationGranularity;
+    const std::uintptr_t span = 0x7F000000ULL;
+
+    for (std::uintptr_t a = (lo - gran) & ~(gran - 1); a > gran && lo - a < span; a -= gran) {
+        if (!InRel32(a, hi) || !InRel32(a + kCodeArenaSize, lo)) continue;
+        if (std::uintptr_t p = TryAllocReadWriteAt(a, kCodeArenaSize)) {
+            g_codeArena = p;
+            break;
+        }
+    }
+    if (!g_codeArena) {
+        for (std::uintptr_t a = (hi + gran) & ~(gran - 1); a - hi < span; a += gran) {
+            if (!InRel32(lo, a + kCodeArenaSize)) break;
+            if (std::uintptr_t p = TryAllocReadWriteAt(a, kCodeArenaSize)) {
+                g_codeArena = p;
+                break;
+            }
+        }
+    }
+    if (!g_codeArena) {
+        for (int i = 0; i < 64 && !g_codeArena; ++i) {
+            void* p = ::VirtualAlloc(nullptr, kCodeArenaSize, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+            if (!p) break;
+            const auto a = reinterpret_cast<std::uintptr_t>(p);
+            if (InRel32(a, hi) && InRel32(a + kCodeArenaSize, lo)) g_codeArena = a;
+            else ::VirtualFree(p, 0, MEM_RELEASE);
+        }
+    }
+    if (!g_codeArena) return false;
+
+    g_codeUsed = 0;
+    g_sealed   = false;
+    std::memset(reinterpret_cast<void*>(g_codeArena), 0xCC, kCodeArenaSize);
+    return true;
+}
+
+std::uintptr_t ArenaBase() { return g_codeArena; }
+
+bool PreparePermanentDetour5(std::uintptr_t site,
+                             void* detourFn,
+                             void** outOrigTrampoline,
+                             const std::uint8_t expected5[5]) {
+    std::lock_guard<std::mutex> lk(g_mx);
+    if (!g_codeArena || g_sealed || !site || !detourFn || !outOrigTrampoline || (site & 0x7ULL) != 0) {
+        return false;
+    }
+    const auto* cur = reinterpret_cast<const std::uint8_t*>(site);
+    if (std::memcmp(cur, expected5, 5) != 0 && cur[0] != 0xE9) return false;
+
+    std::uintptr_t relay = 0;
+    bool chained = false;
+    if (!EmitRelayAndTrampoline(site, 5U, detourFn, expected5, 5U, relay, outOrigTrampoline, chained)) {
+        return false;
+    }
+
+    g_presentHook.valid = true;
+    g_presentHook.active = false;
+    g_presentHook.site  = site;
+    g_presentHook.relay = relay;
+    std::memcpy(g_presentHook.orig5, cur, 5);
+    return true;
+}
+
+bool PrepareDynamicHook5(DynHookId id,
+                         std::uintptr_t site,
+                         void* detourFn,
+                         void** outOrigTrampoline,
+                         const std::uint8_t expected5[5]) {
+    std::lock_guard<std::mutex> lk(g_mx);
+    const auto idx = static_cast<std::size_t>(id);
+    if (!g_codeArena || g_sealed || idx >= kDynCount || !site || !detourFn || !outOrigTrampoline || (site & 0x7ULL) != 0) {
+        return false;
+    }
+    const auto* cur = reinterpret_cast<const std::uint8_t*>(site);
+    if (std::memcmp(cur, expected5, 5) != 0 && cur[0] != 0xE9) return false;
+
+    std::uintptr_t relay = 0;
+    bool chained = false;
+    if (!EmitRelayAndTrampoline(site, 5U, detourFn, expected5, 5U, relay, outOrigTrampoline, chained)) {
+        return false;
+    }
+
+    DynHook5Info& d = g_dynHooks[idx];
+    d.prepared   = true;
+    d.enabled    = false;
+    d.wasChained = chained;
+    d.site       = site;
+    std::memcpy(d.orig5, cur, 5);
+
+    d.jmp5[0] = 0xE9;
+    const auto rel = static_cast<std::int32_t>(
+        static_cast<std::int64_t>(relay) - static_cast<std::int64_t>(site + 5U));
+    std::memcpy(d.jmp5 + 1, &rel, 4);
+    return true; // NOTE: .text is NOT patched! Stays 100% vanilla until Freeze is used!
+}
+
+bool PrepareLazyGuardHook(std::uintptr_t site,
+                          std::size_t len,
+                          void* detourFn,
+                          void** outOrigTrampoline,
+                          const std::uint8_t* displaced,
+                          std::size_t dlen) {
+    std::lock_guard<std::mutex> lk(g_mx);
+    if (!g_codeArena || g_sealed || !site || !detourFn || !outOrigTrampoline || len < 5 || len > 16) {
+        return false;
+    }
+    const auto* cur = reinterpret_cast<const std::uint8_t*>(site);
+    if (std::memcmp(cur, displaced, dlen) != 0 && cur[0] != 0xE9) return false;
+
+    std::uintptr_t relay = 0;
+    bool chained = false;
+    if (!EmitRelayAndTrampoline(site, len, detourFn, displaced, dlen, relay, outOrigTrampoline, chained)) {
+        return false;
+    }
+
+    g_lazyGuard.prepared  = true;
+    g_lazyGuard.installed = false;
+    g_lazyGuard.site      = site;
+    g_lazyGuard.len       = chained ? 5U : len;
+    g_lazyGuard.relay     = relay;
+    std::memcpy(g_lazyGuard.orig, cur, g_lazyGuard.len);
+    return true; // NOTE: .text is NOT patched at startup!
+}
+
+bool FinalizeAndInstallPresentHook() {
+    std::lock_guard<std::mutex> lk(g_mx);
+    if (!g_codeArena || g_sealed || !g_presentHook.valid) return false;
+
+    // 1. Seal trampoline arena as PAGE_EXECUTE_READ (strict W^X — zero RWX pages!)
+    DWORD oldProt = 0;
+    if (!::VirtualProtect(reinterpret_cast<void*>(g_codeArena), kCodeArenaSize,
+                          PAGE_EXECUTE_READ, &oldProt)) {
+        return false;
+    }
+    ::FlushInstructionCache(::GetCurrentProcess(), reinterpret_cast<void*>(g_codeArena), kCodeArenaSize);
+    g_sealed = true;
+
+    // 2. Install ONLY the 5-byte Present jump! All simulation/collision functions remain 100% vanilla!
+    std::uint8_t jmp5[5]{};
+    jmp5[0] = 0xE9;
+    const auto rel = static_cast<std::int32_t>(
+        static_cast<std::int64_t>(g_presentHook.relay) - static_cast<std::int64_t>(g_presentHook.site + 5U));
+    std::memcpy(jmp5 + 1, &rel, 4);
+
+    if (!AtomicSwap5BytesAligned(g_presentHook.site, jmp5)) {
+        return false;
+    }
+    g_presentHook.active = true;
+    return true;
+}
+
+void SetDynamicHook5Enabled(DynHookId id, bool enabled) noexcept {
+    const auto idx = static_cast<std::size_t>(id);
+    if (idx >= kDynCount) return;
+    DynHook5Info& d = g_dynHooks[idx];
+    if (!g_sealed || !d.prepared || d.enabled == enabled) return;
+
+    std::lock_guard<std::mutex> lk(g_mx);
+    if (d.enabled == enabled) return;
+
+    // Safety check if another plugin chained over our site after us: don't clobber foreign jmp on disable
+    if (!enabled) {
+        const auto* cur = reinterpret_cast<const std::uint8_t*>(d.site);
+        if (std::memcmp(cur, d.jmp5, 5) != 0) {
+            d.enabled = false;
+            return;
+        }
+    }
+
+    if (AtomicSwap5BytesAligned(d.site, enabled ? d.jmp5 : d.orig5)) {
+        d.enabled = enabled;
+    }
+}
+
+void EnsureLazyGuardHookInstalled() noexcept {
+    if (!g_sealed || !g_lazyGuard.prepared || g_lazyGuard.installed) return;
+    std::lock_guard<std::mutex> lk(g_mx);
+    if (g_lazyGuard.installed) return;
+
+    std::uint8_t p[16]{};
     p[0] = 0xE9;
-    const std::int32_t rel = (std::int32_t)((std::int64_t)stub - (std::int64_t)(site + 5));
+    const auto rel = static_cast<std::int32_t>(
+        static_cast<std::int64_t>(g_lazyGuard.relay) - static_cast<std::int64_t>(g_lazyGuard.site + 5U));
     std::memcpy(p + 1, &rel, 4);
-    for (std::size_t i = 5; i < len; ++i) p[i] = 0x90;
-    return WriteMem(site, p, len);
-}
+    for (std::size_t i = 5; i < g_lazyGuard.len; ++i) p[i] = 0x90;
 
-bool InstallCtxHook(std::uintptr_t site, std::size_t len, Handler h,
-                    const std::uint8_t* displaced, std::size_t dlen) {
-    Emitter e(256);
-    e.b({0x9C});                                        // pushfq
-    e.b({0x50, 0x51, 0x52, 0x53, 0x55, 0x56, 0x57});    // push rax rcx rdx rbx rbp rsi rdi
-    for (std::uint8_t r = 0; r < 8; ++r) e.b({0x41, std::uint8_t(0x50 + r)});   // push r8..r15
-    e.b({0x48, 0x89, 0xE5});                            // mov rbp, rsp      (rbp = &Ctx)
-    e.b({0x48, 0x83, 0xEC, 0x60});                      // sub rsp, 0x60
-    e.b({0x48, 0x83, 0xE4, 0xF0});                      // and rsp, -16
-    for (std::uint8_t n = 0; n < 6; ++n)                // movdqa [rsp+n*16], xmmN
-        e.b({0x66, 0x0F, 0x7F, std::uint8_t(0x44 | (n << 3)), 0x24, std::uint8_t(n * 16)});
-    e.b({0x48, 0x83, 0xEC, 0x20});                      // sub rsp, 0x20     (shadow space)
-    e.b({0x48, 0x89, 0xE9});                            // mov rcx, rbp
-    e.b({0x48, 0xB8}).u64(reinterpret_cast<std::uint64_t>(h));   // mov rax, handler
-    e.b({0xFF, 0xD0});                                  // call rax
-    e.b({0x48, 0x83, 0xC4, 0x20});                      // add rsp, 0x20
-    for (std::uint8_t n = 0; n < 6; ++n)                // movdqa xmmN, [rsp+n*16]
-        e.b({0x66, 0x0F, 0x6F, std::uint8_t(0x44 | (n << 3)), 0x24, std::uint8_t(n * 16)});
-    e.b({0x48, 0x89, 0xEC});                            // mov rsp, rbp
-    for (int r = 7; r >= 0; --r) e.b({0x41, std::uint8_t(0x58 + r)});   // pop r15..r8
-    e.b({0x5F, 0x5E, 0x5D, 0x5B, 0x5A, 0x59, 0x58});    // pop rdi rsi rbp rbx rdx rcx rax
-    e.b({0x9D});                                        // popfq
-    e.raw(displaced, dlen);
-    e.jmpAbs(site + len);
-
-    const std::uintptr_t stub = Commit(e);
-    return stub && PatchJump(site, len, stub);
-}
-
-bool InstallDetour(std::uintptr_t site, std::size_t len, void* detourFn,
-                   void** outOrigTrampoline, const std::uint8_t* displaced, std::size_t dlen) {
-    if (!site || !detourFn || !outOrigTrampoline || !displaced || len < 5 || len > 16) return false;
-
-    Emitter origEmit(64);
-    origEmit.raw(displaced, dlen);
-    origEmit.jmpAbs(site + len);
-    const std::uintptr_t origTramp = Commit(origEmit);
-    if (!origTramp) return false;
-    *outOrigTrampoline = reinterpret_cast<void*>(origTramp);
-
-    Emitter relayEmit(32);
-    relayEmit.jmpAbs(reinterpret_cast<std::uint64_t>(detourFn));
-    const std::uintptr_t relay = Commit(relayEmit);
-    if (!relay) return false;
-
-    return PatchJump(site, len, relay);
+    if (WriteBytes(g_lazyGuard.site, p, g_lazyGuard.len)) {
+        g_lazyGuard.installed = true;
+    }
 }
 
 void RemoveAllHooks() {
     std::lock_guard<std::mutex> lk(g_mx);
-    for (std::size_t i = g_patchCount; i > 0; --i) {
-        const SavedPatch& sp = g_patches[i - 1];
-        if (sp.site && sp.len > 0) {
-            WriteMem(sp.site, sp.orig, sp.len);
+    if (g_lazyGuard.installed && g_lazyGuard.site) {
+        WriteBytes(g_lazyGuard.site, g_lazyGuard.orig, g_lazyGuard.len);
+        g_lazyGuard.installed = false;
+    }
+    for (std::size_t i = 0; i < kDynCount; ++i) {
+        if (g_dynHooks[i].enabled && g_dynHooks[i].site) {
+            AtomicSwap5BytesAligned(g_dynHooks[i].site, g_dynHooks[i].orig5);
+            g_dynHooks[i].enabled = false;
         }
     }
-    g_patchCount = 0;
+    if (g_presentHook.active && g_presentHook.site) {
+        AtomicSwap5BytesAligned(g_presentHook.site, g_presentHook.orig5);
+        g_presentHook.active = false;
+    }
 }
 
 } // namespace hook

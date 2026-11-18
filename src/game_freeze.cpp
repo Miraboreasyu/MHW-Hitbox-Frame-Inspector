@@ -1,4 +1,5 @@
 #include "game_freeze.h"
+#include "hook.h"
 #include "mhw_addresses.h"
 
 #include <windows.h>
@@ -30,13 +31,39 @@ std::atomic<bool> g_frozen{false};
 std::atomic<bool> g_worldFrozen{false};
 std::atomic<bool> g_keepHitboxesActive{true};
 std::atomic<bool> g_stepCameraGuard{false};
+std::atomic<bool> g_suppressKbActive{false};
+std::atomic<std::uint8_t> g_unitMoveHookFlags{0};
 std::atomic<int>  g_worldStepReq{0};
 std::atomic<bool> g_worldStepActive{false};
 std::atomic<std::uint32_t> g_worldSettledTicks{0};
-std::atomic<ULONGLONG> g_suppressKbCamUntilTick{0};
+int g_suppressKbFramesLeft = 0;
 std::atomic<std::uintptr_t> g_cachedMainPlayer{0};
 std::atomic<std::uintptr_t> g_cachedActiveCam{0};
 bool g_prevPlActionDef = false;
+
+constexpr std::uint8_t kMoveFlagWorldFreeze  = 0x01U;
+constexpr std::uint8_t kMoveFlagStepCamGuard = 0x02U;
+constexpr std::uint8_t kMoveFlagSuppressKb   = 0x04U;
+
+inline void RefreshUnitMoveFlags() {
+    std::uint8_t f = 0;
+    const bool worldFrz = g_worldFrozen.load(std::memory_order_relaxed) &&
+                          !g_frozen.load(std::memory_order_relaxed);
+    if (worldFrz)
+        f |= kMoveFlagWorldFreeze;
+    if (g_stepCameraGuard.load(std::memory_order_relaxed))
+        f |= kMoveFlagStepCamGuard;
+    if (g_suppressKbActive.load(std::memory_order_relaxed))
+        f |= kMoveFlagSuppressKb;
+    g_unitMoveHookFlags.store(f, std::memory_order_release);
+
+    const bool needHitKeep = worldFrz && g_keepHitboxesActive.load(std::memory_order_relaxed);
+    if (needHitKeep) {
+        hook::EnsureLazyGuardHookInstalled();
+    }
+    hook::SetDynamicHook5Enabled(hook::kDynHitDispatch, needHitKeep);
+    hook::SetDynamicHook5Enabled(hook::kDynGenericMove, f != 0);
+}
 
 // Rolling live camera angle snapshot to undo any 1-frame hotkey nudge on freeze entry
 struct CamAngles {
@@ -834,6 +861,7 @@ bool ApplyMainFreezeSEH(std::uintptr_t exeBase, int mode) {
         } else if (mode == 2) {
             FlushAllCameraInputDeltas(exeBase, true);
             g_stepCameraGuard.store(true, std::memory_order_release);
+            RefreshUnitMoveFlags();
             *pPauseNext = 1;
             *pSkip      = 1;
             *pStepCount = 1;
@@ -852,14 +880,16 @@ bool ApplyMainFreezeSEH(std::uintptr_t exeBase, int mode) {
     }
 }
 
-void UpdateLiveCamSnapshotSEH(std::uintptr_t exeBase, bool suppressKbCam) {
+void UpdateLiveCamSnapshotSEH(std::uintptr_t exeBase, bool suppressKbCam, bool needMainPlayer) {
     __try {
         if (suppressKbCam) {
             ClearKeyboardCamInput(exeBase);
         }
-        const std::uintptr_t mainPl = GetMainPlayerUnit(exeBase);
-        const std::uintptr_t cam    = GetActiveCameraUnit(exeBase);
-        g_cachedMainPlayer.store(mainPl, std::memory_order_relaxed);
+        if (needMainPlayer) {
+            const std::uintptr_t mainPl = GetMainPlayerUnit(exeBase);
+            g_cachedMainPlayer.store(mainPl, std::memory_order_relaxed);
+        }
+        const std::uintptr_t cam = GetActiveCameraUnit(exeBase);
         g_cachedActiveCam.store(cam, std::memory_order_relaxed);
 
         if (g_frozen.load(std::memory_order_relaxed)) return;
@@ -897,6 +927,13 @@ void SetOrigGuardDispatch(void* origFn) {
 void __fastcall Hook_UnitGenericMove(std::uintptr_t unit) {
     if (!g_origUnitGenericMove) return;
 
+    // Ultra-fast 1-byte check across all ~8,000 unit moves per frame when idle!
+    const std::uint8_t fastFlags = g_unitMoveHookFlags.load(std::memory_order_relaxed);
+    if (fastFlags == 0) {
+        g_origUnitGenericMove(unit);
+        return;
+    }
+
     const std::uintptr_t exeBase = g_exeBase;
     const std::uintptr_t exeEnd  = g_exeEnd;
     if (!exeBase || !exeEnd) {
@@ -904,21 +941,21 @@ void __fastcall Hook_UnitGenericMove(std::uintptr_t unit) {
         return;
     }
 
-    const ULONGLONG suppressUntil = g_suppressKbCamUntilTick.load(std::memory_order_relaxed);
-    if (suppressUntil != 0 && ::GetTickCount64() <= suppressUntil) {
+    if ((fastFlags & kMoveFlagSuppressKb) != 0) {
         __try {
             ClearKeyboardCamInput(exeBase);
         } __except (EXCEPTION_EXECUTE_HANDLER) {}
     }
 
     // Guard camera pitch/yaw during FullFreeze single-frame step
-    if (g_stepCameraGuard.load(std::memory_order_acquire)) {
+    if ((fastFlags & kMoveFlagStepCamGuard) != 0 && g_stepCameraGuard.load(std::memory_order_acquire)) {
         std::uintptr_t activeCam = g_cachedActiveCam.load(std::memory_order_relaxed);
         if (!activeCam) {
             __try { activeCam = GetActiveCameraUnit(exeBase); } __except (EXCEPTION_EXECUTE_HANDLER) {}
         }
         if (activeCam != 0 && unit == activeCam) {
             if (g_stepCameraGuard.exchange(false, std::memory_order_acq_rel)) {
+                RefreshUnitMoveFlags();
                 RunGuardedCameraStepMove(exeBase, unit);
                 return;
             }
@@ -926,7 +963,9 @@ void __fastcall Hook_UnitGenericMove(std::uintptr_t unit) {
     }
 
     // WorldFreeze ("Pause Everything Except Player")
-    if (g_worldFrozen.load(std::memory_order_acquire) && !g_frozen.load(std::memory_order_relaxed)) {
+    if ((fastFlags & kMoveFlagWorldFreeze) != 0 &&
+        g_worldFrozen.load(std::memory_order_acquire) &&
+        !g_frozen.load(std::memory_order_relaxed)) {
         const std::uintptr_t mainPl = g_cachedMainPlayer.load(std::memory_order_relaxed);
         std::uintptr_t anchorUnit = mainPl;
         if (!anchorUnit) anchorUnit = g_cachedActiveCam.load(std::memory_order_relaxed);
@@ -1000,6 +1039,7 @@ bool Toggle(std::uintptr_t exeBase) {
 
 void SetFrozen(std::uintptr_t exeBase, bool frozen) {
     if (frozen) {
+        UpdateLiveCamSnapshotSEH(exeBase, false, false);
         if (g_worldFrozen.load(std::memory_order_relaxed)) {
             g_worldFrozen.store(false, std::memory_order_release);
             g_worldStepActive.store(false, std::memory_order_relaxed);
@@ -1011,9 +1051,11 @@ void SetFrozen(std::uintptr_t exeBase, bool frozen) {
     g_stepCameraGuard.store(false, std::memory_order_relaxed);
     if (ApplyMainFreezeSEH(exeBase, frozen ? 1 : 0)) {
         g_frozen.store(frozen, std::memory_order_release);
+        RefreshUnitMoveFlags();
         app::Log("freeze: Full Freeze %s", frozen ? "ON (zero-delay instant pause)" : "OFF (resumed)");
     } else {
         g_frozen.store(false, std::memory_order_release);
+        RefreshUnitMoveFlags();
         app::Log("freeze: sMhMain not ready yet");
     }
 }
@@ -1030,6 +1072,7 @@ void SetWorldFrozen(std::uintptr_t exeBase, bool worldFrozen) {
             ApplyMainFreezeSEH(exeBase, 0);
             g_frozen.store(false, std::memory_order_release);
         }
+        UpdateLiveCamSnapshotSEH(exeBase, false, true);
         ClearWorldEffectsTable();
         ClearPinnedNodesTable();
         g_prevPlActionDef = false;
@@ -1037,12 +1080,14 @@ void SetWorldFrozen(std::uintptr_t exeBase, bool worldFrozen) {
         g_worldStepReq.store(0, std::memory_order_relaxed);
         g_worldStepActive.store(false, std::memory_order_relaxed);
         g_worldFrozen.store(true, std::memory_order_release);
+        RefreshUnitMoveFlags();
         app::Log("freeze: World Freeze ON (everything paused except Player, keepHitboxes=%s)",
                  g_keepHitboxesActive.load(std::memory_order_relaxed) ? "ON" : "OFF");
     } else {
         g_worldFrozen.store(false, std::memory_order_release);
         g_worldStepReq.store(0, std::memory_order_relaxed);
         g_worldStepActive.store(false, std::memory_order_relaxed);
+        RefreshUnitMoveFlags();
         ClearWorldEffectsTable();
         ClearPinnedNodesTable();
         app::Log("freeze: World Freeze OFF (world resumed)");
@@ -1060,6 +1105,7 @@ void SetKeepHitboxesActive(bool keepActive) {
     if (!keepActive) {
         ClearPinnedNodesTable();
     }
+    RefreshUnitMoveFlags();
     app::Log("freeze: Keep Single-Trigger Hitboxes Active = %s", keepActive ? "ON" : "OFF");
 }
 
@@ -1083,31 +1129,28 @@ bool StepOneFrame(std::uintptr_t exeBase) {
     return false;
 }
 
-void SyncPerFrame(std::uintptr_t exeBase, const app::Config& cfg, bool gameForeground) {
-    bool anyModKeyHeld = false;
-    if (gameForeground) {
-        const int keys[6] = {
-            cfg.vkToggleVis, cfg.vkToggleFreeze, cfg.vkFreezeOthers,
-            cfg.vkPersistHitbox, cfg.vkStepFrame, cfg.vkCycleFilter
-        };
-        for (int vk : keys) {
-            if (vk > 0 && vk < 256 && (::GetAsyncKeyState(vk) & 0x8000) != 0) {
-                anyModKeyHeld = true;
-                break;
-            }
-        }
-        if (anyModKeyHeld) {
-            g_suppressKbCamUntilTick.store(::GetTickCount64() + 100ULL, std::memory_order_relaxed);
-        }
+bool SyncActiveFrame(std::uintptr_t exeBase, bool anyModKeyHeld) {
+    if (anyModKeyHeld) {
+        g_suppressKbFramesLeft = 10;
+    } else if (g_suppressKbFramesLeft > 0) {
+        --g_suppressKbFramesLeft;
     }
 
-    const bool suppressNow = anyModKeyHeld ||
-                             (::GetTickCount64() <= g_suppressKbCamUntilTick.load(std::memory_order_relaxed));
-    UpdateLiveCamSnapshotSEH(exeBase, suppressNow);
+    const bool suppressNow = (g_suppressKbFramesLeft > 0);
+    if (suppressNow != g_suppressKbActive.load(std::memory_order_relaxed)) {
+        g_suppressKbActive.store(suppressNow, std::memory_order_relaxed);
+        RefreshUnitMoveFlags();
+    }
 
-    if (g_frozen.load(std::memory_order_relaxed)) {
+    const bool fullFrz  = g_frozen.load(std::memory_order_relaxed);
+    const bool worldFrz = g_worldFrozen.load(std::memory_order_relaxed);
+    if (suppressNow || worldFrz) {
+        UpdateLiveCamSnapshotSEH(exeBase, suppressNow, worldFrz);
+    }
+    if (fullFrz) {
         ApplyMainFreezeSEH(exeBase, 3);
     }
+    return suppressNow || fullFrz || worldFrz;
 }
 
 bool IsFrozen() {

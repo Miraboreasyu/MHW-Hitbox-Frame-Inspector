@@ -21,6 +21,7 @@ struct Config {
     int vkPersistHitbox     = 'J';   // 0x4A: Toggle keeping single-trigger hitboxes active while frozen
     int vkStepFrame         = 'O';   // 0x4F: Advance 1 frame while frozen (Full or World Freeze)
     int vkCycleFilter       = 'P';   // 0x50: Cycle display filter mode
+
     bool startVisOn         = false; // Whether hitbox display starts ON automatically
     bool keepHitboxesActive = true;  // Keep single-trigger frozen hitboxes active & repeatable in World Freeze
     bool showHudBanner      = true;  // Show compact top-left status indicator
@@ -30,6 +31,7 @@ struct Config {
 };
 
 void InitLog();
+void CloseLog();
 void Log(const char* fmt, ...);
 std::string DllDirectory();
 Config LoadConfig();

@@ -36,7 +36,8 @@ void SetKeepHitboxesActive(bool keepActive);
 bool IsKeepHitboxesActive();
 
 bool StepOneFrame(std::uintptr_t exeBase);
-void SyncPerFrame(std::uintptr_t exeBase, const app::Config& cfg, bool gameForeground);
+// Returns true if per-frame camera/freeze maintenance still needs Present ticks.
+bool SyncActiveFrame(std::uintptr_t exeBase, bool anyModKeyHeld);
 
 bool IsFrozen();
 bool IsWorldFrozen();

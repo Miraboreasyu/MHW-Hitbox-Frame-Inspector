@@ -60,7 +60,7 @@ struct PtrSet {
     bool insert(std::uintptr_t k) {
         if (!k) return false;
         std::uint32_t idx = static_cast<std::uint32_t>((k >> 4) * 2654435761ULL) & (N - 1);
-        for (std::uint32_t n = 0; n < N; ++n) {
+        for (std::uint32_t n = 0; n < 32; ++n) {
             const std::uintptr_t cur = keys[idx];
             if (cur == k) return false;
             if (cur == 0) {
@@ -76,25 +76,16 @@ struct PtrSet {
 struct DtiCacheEntry {
     std::uintptr_t dti;
     OwnerSide side;
-    std::uint8_t probeCount;
-    std::uint8_t numOffsets;
-    std::uint32_t offsets[8];
+    bool skipUnit;
+    std::uint16_t directCollOffset;
 };
 
-struct TrackedCollEntry {
-    std::uintptr_t coll;
-    OwnerSide side;
-};
-
-constexpr std::uint32_t kDtiCacheSize    = 1024;
-constexpr std::uint32_t kMaxTrackedColls = 512;
+constexpr std::uint32_t kDtiCacheSize = 4096;
 
 // Persistent POD caches (only accessed on the render/present thread)
 DtiCacheEntry g_dtiCache[kDtiCacheSize]{};
-TrackedCollEntry g_trackedColls[kMaxTrackedColls]{};
-std::uint32_t g_trackedCollCount = 0;
-PtrSet<2048> g_seenColls;
-PtrSet<4096> g_seenGeoms;
+PtrSet<4096> g_seenColls;
+PtrSet<8192> g_seenGeoms;
 ShapeRecord g_shapes[kMaxShapes];
 
 struct PlayerFrameReadout {
@@ -192,17 +183,46 @@ inline bool IsCpObjCollision(std::uintptr_t cand, std::uintptr_t exeBase, std::u
     return fnGetDti == (exeBase + mhw::kRvaCpObjCollisionGetDti);
 }
 
+bool IsNonCollisionSystemClass(const char* name) {
+    if (!name || !IsCanonicalPtr(reinterpret_cast<std::uintptr_t>(name))) return false;
+    return StartsWith(name, "uMhGUI") || StartsWith(name, "uGUI") ||
+           StartsWith(name, "uSound") || StartsWith(name, "uSnd") ||
+           StartsWith(name, "uMhCamera") || StartsWith(name, "uCamera") ||
+           StartsWith(name, "uLight") || StartsWith(name, "uCns") ||
+           StartsWith(name, "uSky") || StartsWith(name, "uWeather") ||
+           StartsWith(name, "uFog") || StartsWith(name, "uPost");
+}
+
+std::uint16_t ResolveKnownDirectCollOffset(const char* name) {
+    if (!name || !IsCanonicalPtr(reinterpret_cast<std::uintptr_t>(name))) return 0;
+    if (StartsWith(name, "uWeapon") || StartsWith(name, "uWp")) {
+        return static_cast<std::uint16_t>(mhw::kOffUWpColl);
+    }
+    if (StartsWith(name, "uShell")) {
+        return static_cast<std::uint16_t>(mhw::kOffUShellColl);
+    }
+    if (StartsWith(name, "uStageGimmick") || StartsWith(name, "uHmGimmick") || StartsWith(name, "uGm")) {
+        return static_cast<std::uint16_t>(mhw::kOffUGimmickColl);
+    }
+    if (StartsWith(name, "uCharacterModel") || StartsWith(name, "uPlayer") ||
+        StartsWith(name, "uOtomo") || StartsWith(name, "uEnemy") || StartsWith(name, "Monster")) {
+        return static_cast<std::uint16_t>(mhw::kOffUPlayerColl);
+    }
+    return 0;
+}
+
 DtiCacheEntry* LookupOrCreateDtiEntry(std::uintptr_t dti, std::uintptr_t exeBase) {
     if (!dti) return nullptr;
-    std::uint32_t idx = static_cast<std::uint32_t>((dti >> 4) * 2654435761ULL) & (kDtiCacheSize - 1);
-    for (std::uint32_t i = 0; i < kDtiCacheSize; ++i) {
+    const std::uint32_t startIdx = static_cast<std::uint32_t>((dti >> 4) * 2654435761ULL) & (kDtiCacheSize - 1);
+    std::uint32_t idx = startIdx;
+    for (std::uint32_t i = 0; i < 24; ++i) {
         if (g_dtiCache[idx].dti == dti) return &g_dtiCache[idx];
-        if (g_dtiCache[idx].dti == 0) {
+        if (g_dtiCache[idx].dti == 0 || i == 23) {
             DtiCacheEntry& e = g_dtiCache[idx];
             e.dti = dti;
             e.side = OwnerSide::Unknown;
-            e.probeCount = 0;
-            e.numOffsets = 0;
+            e.skipUnit = false;
+            e.directCollOffset = 0;
 
             std::uintptr_t cur = dti;
             for (int depth = 0; depth < 20 && IsAlignedPtr(cur); ++depth) {
@@ -222,11 +242,20 @@ DtiCacheEntry* LookupOrCreateDtiEntry(std::uintptr_t dti, std::uintptr_t exeBase
                     }
                 }
                 const char* clsName = *reinterpret_cast<const char* const*>(cur + mhw::kOffDtiName);
-                const OwnerSide s = ClassifyClassName(clsName);
-                if (s != OwnerSide::Unknown) {
-                    e.side = s;
+                if (IsNonCollisionSystemClass(clsName)) {
+                    e.skipUnit = true;
                     break;
                 }
+                if (e.directCollOffset == 0) {
+                    e.directCollOffset = ResolveKnownDirectCollOffset(clsName);
+                }
+                if (e.side == OwnerSide::Unknown) {
+                    const OwnerSide s = ClassifyClassName(clsName);
+                    if (s != OwnerSide::Unknown) {
+                        e.side = s;
+                    }
+                }
+                if (e.side != OwnerSide::Unknown && e.directCollOffset != 0) break;
                 cur = *reinterpret_cast<const std::uintptr_t*>(cur + mhw::kOffDtiParent);
             }
             return &e;
@@ -425,19 +454,6 @@ PlayerFrameReadout EvaluatePlayerDefense(std::uintptr_t pl, std::uintptr_t coll)
     return out;
 }
 
-void RememberTrackedCollision(std::uintptr_t coll, OwnerSide side) {
-    if (!coll) return;
-    for (std::uint32_t i = 0; i < g_trackedCollCount; ++i) {
-        if (g_trackedColls[i].coll == coll) {
-            if (side != OwnerSide::Unknown) g_trackedColls[i].side = side;
-            return;
-        }
-    }
-    if (g_trackedCollCount < kMaxTrackedColls) {
-        g_trackedColls[g_trackedCollCount++] = {coll, side};
-    }
-}
-
 bool RecordMtGeometry(std::uintptr_t geom,
                       VolumeCat cat,
                       PlayerDefState plDef,
@@ -579,8 +595,6 @@ void HarvestCpObjCollision(std::uintptr_t coll,
         if (hitGroup == 1) baseSide = OwnerSide::Player;
         else if (hitGroup == 2 || hitGroup == 3 || hitGroup == 5) baseSide = OwnerSide::Monster;
     }
-
-    RememberTrackedCollision(coll, baseSide);
 
     PlayerDefState unitPlDef = PlayerDefState::Normal;
     if (baseSide == OwnerSide::Player && IsUPlayerUnit(owner, exeBase, exeEnd)) {
@@ -802,7 +816,7 @@ void CollectSnapshotSEH(std::uintptr_t exeBase,
             }
         }
 
-        // 4. Universal sMhUnit Traversal (walks cComponentManager list +0x78 AND probes member offsets up to 256 KB)
+        // 4. Fast O(1)-cached sMhUnit Traversal (zero blind raw-memory probing, zero VirtualQuery!)
         std::uintptr_t unitSys = *reinterpret_cast<const std::uintptr_t*>(exeBase + mhw::kRvaSMhUnitInstance);
         if (!IsAlignedPtr(unitSys)) {
             unitSys = *reinterpret_cast<const std::uintptr_t*>(mhMain + mhw::kOffMhMainUnit);
@@ -817,30 +831,18 @@ void CollectSnapshotSEH(std::uintptr_t exeBase,
                     const std::uintptr_t nextUnit = *reinterpret_cast<const std::uintptr_t*>(unit + mhw::kOffUnitNext);
                     const std::uint8_t alive = *reinterpret_cast<const std::uint8_t*>(unit + mhw::kOffUnitAliveFlags);
                     if ((alive & 0x0EU) != 0) {
+                        const std::uintptr_t compHead = *reinterpret_cast<const std::uintptr_t*>(unit + mhw::kOffCompMgrHead);
                         const std::uintptr_t dti = GetObjectDti(unit, exeBase, exeEnd);
                         DtiCacheEntry* entry = LookupOrCreateDtiEntry(dti, exeBase);
-                        const OwnerSide unitSide = entry ? entry->side : OwnerSide::Unknown;
-
-                        // 4a. Walk cUnit's component linked list (+0x78 -> +0x08) — catches every cpObjCollision regardless of struct size!
-                        HarvestUnitComponents(unit, unitSide, exeBase, exeEnd, filterMode, *outSnap);
-
-                        // 4b. Also probe direct pointer fields up to 0x40000 bytes (8 slots)
-                        if (entry) {
-                            if (entry->numOffsets == 0 && entry->probeCount < 12) {
-                                ++entry->probeCount;
-                                const std::uint32_t sizeFlags = *reinterpret_cast<const std::uint32_t*>(dti + mhw::kOffDtiSizeFlags);
-                                std::uint32_t objBytes = (sizeFlags & 0x7FFFFFU) * 4U;
-                                if (objBytes > 0x40000U) objBytes = 0x40000U;
-                                for (std::uint32_t off = 0x38; off + 8 <= objBytes && entry->numOffsets < 8; off += 8) {
-                                    const std::uintptr_t cand = *reinterpret_cast<const std::uintptr_t*>(unit + off);
-                                    if (IsCpObjCollision(cand, exeBase, exeEnd)) {
-                                        entry->offsets[entry->numOffsets++] = off;
-                                    }
-                                }
+                        if (!entry || !entry->skipUnit) {
+                            const OwnerSide unitSide = entry ? entry->side : OwnerSide::Unknown;
+                            if (IsAlignedPtr(compHead)) {
+                                HarvestUnitComponents(unit, unitSide, exeBase, exeEnd, filterMode, *outSnap);
                             }
-                            for (std::uint8_t k = 0; k < entry->numOffsets; ++k) {
-                                const std::uintptr_t coll = *reinterpret_cast<const std::uintptr_t*>(unit + entry->offsets[k]);
-                                HarvestCpObjCollision(coll, entry->side, exeBase, exeEnd, filterMode, *outSnap);
+                            if (entry && entry->directCollOffset != 0) {
+                                const std::uintptr_t coll =
+                                    *reinterpret_cast<const std::uintptr_t*>(unit + entry->directCollOffset);
+                                HarvestCpObjCollision(coll, unitSide, exeBase, exeEnd, filterMode, *outSnap);
                             }
                         }
                     }
@@ -934,22 +936,6 @@ void CollectSnapshotSEH(std::uintptr_t exeBase,
                 }
             }
         }
-
-        // 6. Sweep persistent tracked cpObjCollision* cache (guarantees paused-frame stability & prunes freed units)
-        std::uint32_t writeIdx = 0;
-        for (std::uint32_t i = 0; i < g_trackedCollCount; ++i) {
-            const TrackedCollEntry tc = g_trackedColls[i];
-            if (!app::Readable(tc.coll, 0x200) || !IsCpObjCollision(tc.coll, exeBase, exeEnd)) continue;
-            const std::uint8_t cFlags = *reinterpret_cast<const std::uint8_t*>(tc.coll + mhw::kOffObjCollFlags);
-            const std::uintptr_t owner = *reinterpret_cast<const std::uintptr_t*>(tc.coll + mhw::kOffObjCollOwner);
-            if ((cFlags & 0x01U) == 0 || !IsAlignedPtr(owner) || !app::Readable(owner, 0x40)) continue;
-            const std::uint8_t oAlive = *reinterpret_cast<const std::uint8_t*>(owner + mhw::kOffUnitAliveFlags);
-            if ((oAlive & 0x0EU) == 0) continue;
-
-            g_trackedColls[writeIdx++] = tc;
-            HarvestCpObjCollision(tc.coll, tc.side, exeBase, exeEnd, filterMode, *outSnap);
-        }
-        g_trackedCollCount = writeIdx;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         // Safely ignore transient pointer races during level/quest unload
     }
@@ -1348,6 +1334,15 @@ const std::uint8_t* Glyph5x7(char ch) {
         case '(': { static const std::uint8_t g[7]={0x02,0x04,0x08,0x08,0x08,0x04,0x02}; return g; }
         case ')': { static const std::uint8_t g[7]={0x08,0x04,0x02,0x02,0x02,0x04,0x08}; return g; }
         case '.': { static const std::uint8_t g[7]={0x00,0x00,0x00,0x00,0x00,0x06,0x06}; return g; }
+        case ',': { static const std::uint8_t g[7]={0x00,0x00,0x00,0x00,0x06,0x04,0x08}; return g; }
+        case ';': { static const std::uint8_t g[7]={0x00,0x04,0x04,0x00,0x04,0x04,0x08}; return g; }
+        case '\'':{ static const std::uint8_t g[7]={0x04,0x04,0x08,0x00,0x00,0x00,0x00}; return g; }
+        case '#': { static const std::uint8_t g[7]={0x0A,0x0A,0x1F,0x0A,0x1F,0x0A,0x0A}; return g; }
+        case '=': { static const std::uint8_t g[7]={0x00,0x00,0x1F,0x00,0x1F,0x00,0x00}; return g; }
+        case '*': { static const std::uint8_t g[7]={0x00,0x15,0x0E,0x1F,0x0E,0x15,0x00}; return g; }
+        case '<': { static const std::uint8_t g[7]={0x02,0x04,0x08,0x10,0x08,0x04,0x02}; return g; }
+        case '>': { static const std::uint8_t g[7]={0x08,0x04,0x02,0x01,0x02,0x04,0x08}; return g; }
+        case '%': { static const std::uint8_t g[7]={0x19,0x19,0x02,0x04,0x08,0x13,0x13}; return g; }
         case '!': { static const std::uint8_t g[7]={0x04,0x04,0x04,0x04,0x04,0x00,0x04}; return g; }
         default:  return nullptr;
     }
@@ -1560,11 +1555,12 @@ void BuildOverlayFrame(std::uintptr_t exeBase,
                             : "WORLD ([O] STEP [J] KEEP:OFF)";
         }
 
-        char line1[192]{};
+        char line1[224]{};
         char stateSeg[48]{};
+
         if (!visEnabled && !anyFreeze && showStartupToast) {
             std::snprintf(line1, sizeof(line1),
-                          "DEBUG HITBOX READY  [U] VIS  [I] FREEZE  [K] WORLD  [J] KEEP  [O] STEP  [P] MODE");
+                          "DEBUG HITBOX READY  |  [U] VIS  [I] FREEZE  [K] WORLD  [J] KEEP  [O] +1F  [P] FILTER");
         } else {
             std::snprintf(line1, sizeof(line1),
                           "VIS:%s [%s]  PL:%u/%u EM:%u/%u  |  FREEZE:%s",
@@ -1583,6 +1579,7 @@ void BuildOverlayFrame(std::uintptr_t exeBase,
         const float textW1 = static_cast<float>(len1 + len2) * 6.0f * px;
         const float minLegendW = visEnabled ? (56.0f * 6.0f * 0.85f * px) : 0.0f;
         const float boxInnerW = (textW1 > minLegendW) ? textW1 : minLegendW;
+
         const float padX  = 8.0f * resScale;
         const float padY  = 6.0f * resScale;
         const float barH  = 7.0f * px + padY * 2.0f + (visEnabled ? (10.0f * px) : 0.0f);

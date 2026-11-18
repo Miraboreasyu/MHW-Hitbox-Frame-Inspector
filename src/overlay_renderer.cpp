@@ -395,7 +395,7 @@ void RenderD3D11(std::uintptr_t exeBase,
                  app::FilterMode filterMode,
                  const app::Config& cfg,
                  bool showStartupToast) {
-    if (!app::Readable(d3dRender, 0x1680)) return;
+    if (!d3dRender) return;
     const std::uint32_t scCount = *reinterpret_cast<const std::uint32_t*>(d3dRender + mhw::kOffD3DSwapChainCount);
     if (scCount == 0) return;
 
@@ -536,7 +536,7 @@ void RenderD3D12(std::uintptr_t exeBase,
                  app::FilterMode filterMode,
                  const app::Config& cfg,
                  bool showStartupToast) {
-    if (!app::Readable(d3dRender, 0x1680)) return;
+    if (!d3dRender) return;
     if (*reinterpret_cast<const std::uint8_t*>(d3dRender + mhw::kOffD3DOccludedByte) != 0) return;
     const std::uint32_t scCount = *reinterpret_cast<const std::uint32_t*>(d3dRender + mhw::kOffD3DSwapChainCount);
     if (scCount == 0) return;
@@ -658,6 +658,10 @@ void OnPresent(std::uintptr_t exeBase,
     if (!exeBase || !d3dRender) return;
     if (!visEnabled && freezeMode == freeze::Mode::None && !showStartupToast) return;
 
+    if (g_verts.capacity() < 65536) {
+        g_verts.reserve(65536);
+    }
+
     const bool isDx12 = (*reinterpret_cast<const std::uint8_t*>(exeBase + mhw::kRvaIsD3D12Byte) != 0);
     if (isDx12) {
         RenderD3D12(exeBase, d3dRender, visEnabled, freezeMode, filterMode, cfg, showStartupToast);
@@ -667,7 +671,7 @@ void OnPresent(std::uintptr_t exeBase,
 }
 
 HWND GetGameWindow(std::uintptr_t d3dRender) {
-    if (!d3dRender || !app::Readable(d3dRender + mhw::kOffD3DSwapHwnd, sizeof(HWND))) return nullptr;
+    if (d3dRender < 0x100000ULL || d3dRender > 0x00007FFFFFFF0000ULL) return nullptr;
     return *reinterpret_cast<HWND const*>(d3dRender + mhw::kOffD3DSwapHwnd);
 }
 

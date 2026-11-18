@@ -1,6 +1,7 @@
 #include "log_config.h"
 
 #include <windows.h>
+#include <share.h>
 #include <cctype>
 #include <cstdarg>
 #include <cstdio>
@@ -14,6 +15,7 @@ namespace {
 std::mutex g_logMx;
 std::string g_logPath;
 std::string g_dllDir;
+FILE* g_logFile = nullptr;
 
 void EnsurePaths() {
     if (!g_logPath.empty()) return;
@@ -84,8 +86,6 @@ int ParseVirtualKey(const std::string& raw, int fallback) {
     if (s == "END") return VK_END;
     if (s == "PGUP" || s == "PAGEUP") return VK_PRIOR;
     if (s == "PGDN" || s == "PAGEDOWN") return VK_NEXT;
-    if (s == "LBRACKET") return VK_OEM_4;
-    if (s == "RBRACKET") return VK_OEM_6;
     if (s.rfind("NUMPAD", 0) == 0 && s.size() == 7 && s[6] >= '0' && s[6] <= '9') {
         return VK_NUMPAD0 + (s[6] - '0');
     }
@@ -100,32 +100,47 @@ int ParseVirtualKey(const std::string& raw, int fallback) {
 void InitLog() {
     std::lock_guard<std::mutex> lk(g_logMx);
     EnsurePaths();
-    FILE* f = nullptr;
-    if (fopen_s(&f, g_logPath.c_str(), "w") == 0 && f) {
+    if (g_logFile) {
+        std::fclose(g_logFile);
+        g_logFile = nullptr;
+    }
+    g_logFile = _fsopen(g_logPath.c_str(), "w", _SH_DENYNO);
+    if (g_logFile) {
         SYSTEMTIME st{};
         ::GetLocalTime(&st);
-        std::fprintf(f, "[%04u-%02u-%02u %02u:%02u:%02u.%03u] debug_hitbox plugin attached (dir=%s)\n",
+        std::fprintf(g_logFile, "[%04u-%02u-%02u %02u:%02u:%02u.%03u] debug_hitbox plugin attached (dir=%s)\n",
                      st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds,
                      g_dllDir.c_str());
-        std::fclose(f);
+        std::fflush(g_logFile);
+    }
+}
+
+void CloseLog() {
+    std::lock_guard<std::mutex> lk(g_logMx);
+    if (g_logFile) {
+        std::fflush(g_logFile);
+        std::fclose(g_logFile);
+        g_logFile = nullptr;
     }
 }
 
 void Log(const char* fmt, ...) {
     std::lock_guard<std::mutex> lk(g_logMx);
     EnsurePaths();
-    FILE* f = nullptr;
-    if (fopen_s(&f, g_logPath.c_str(), "a") == 0 && f) {
+    if (!g_logFile) {
+        g_logFile = _fsopen(g_logPath.c_str(), "a", _SH_DENYNO);
+    }
+    if (g_logFile) {
         SYSTEMTIME st{};
         ::GetLocalTime(&st);
-        std::fprintf(f, "[%02u:%02u:%02u.%03u] ",
+        std::fprintf(g_logFile, "[%02u:%02u:%02u.%03u] ",
                      st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
         va_list ap;
         va_start(ap, fmt);
-        std::vfprintf(f, fmt, ap);
+        std::vfprintf(g_logFile, fmt, ap);
         va_end(ap);
-        std::fputc('\n', f);
-        std::fclose(f);
+        std::fputc('\n', g_logFile);
+        std::fflush(g_logFile);
     }
 }
 
@@ -170,10 +185,13 @@ Config LoadConfig() {
         const std::size_t eq = line.find('=');
         if (eq == std::string::npos) continue;
         const std::string key = Upper(Trim(line.substr(0, eq)));
-        std::string val = line.substr(eq + 1);
-        const std::size_t semi = val.find(';');
-        if (semi != std::string::npos) val = val.substr(0, semi);
-        val = Trim(val);
+        std::string val = Trim(line.substr(eq + 1));
+        if (!val.empty() && val[0] == ';') {
+            val = ";";
+        } else {
+            const std::size_t semi = val.find(';');
+            if (semi != std::string::npos) val = Trim(val.substr(0, semi));
+        }
 
         if (key == "ENABLED") cfg.enabled = std::atoi(val.c_str()) != 0;
         else if (key == "KEYTOGGLEVIS" || key == "KEY_VIS") cfg.vkToggleVis = ParseVirtualKey(val, cfg.vkToggleVis);
@@ -200,9 +218,9 @@ Config LoadConfig() {
         }
     }
 
-    Log("config: loaded debug_hitbox.ini (enabled=%d, vkVis=0x%02X, vkFreeze=0x%02X, vkWorld=0x%02X, vkKeep=0x%02X, vkStep=0x%02X, vkFilter=0x%02X, keepActive=%d, hdrNits=%.1f)",
-        cfg.enabled ? 1 : 0, cfg.vkToggleVis, cfg.vkToggleFreeze, cfg.vkFreezeOthers, cfg.vkPersistHitbox,
-        cfg.vkStepFrame, cfg.vkCycleFilter, cfg.keepHitboxesActive ? 1 : 0, cfg.hdrNits);
+    Log("config: loaded debug_hitbox.ini (enabled=%d, vkVis=0x%02X, vkFreeze=0x%02X, vkWorld=0x%02X, vkKeep=0x%02X, vkStep=0x%02X, vkFilter=0x%02X)",
+        cfg.enabled ? 1 : 0, cfg.vkToggleVis, cfg.vkToggleFreeze, cfg.vkFreezeOthers,
+        cfg.vkPersistHitbox, cfg.vkStepFrame, cfg.vkCycleFilter);
     return cfg;
 }
 
