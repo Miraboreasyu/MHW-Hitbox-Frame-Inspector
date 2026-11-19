@@ -9,6 +9,7 @@ namespace hook {
 namespace {
 
 constexpr std::size_t kCodeArenaSize = 0x1000; // Single 4 KB PAGE_EXECUTE_READ page
+constexpr std::size_t kMaxPermHooks  = 4;
 
 struct PermanentHookInfo {
     bool           valid = false;
@@ -39,7 +40,8 @@ struct LazyHookInfo {
 std::uintptr_t    g_codeArena = 0;
 std::size_t       g_codeUsed  = 0;
 bool              g_sealed    = false;
-PermanentHookInfo g_presentHook{};
+PermanentHookInfo g_permHooks[kMaxPermHooks]{};
+std::size_t       g_permHookCount = 0;
 DynHook5Info      g_dynHooks[kDynCount]{};
 LazyHookInfo      g_lazyGuard{};
 std::mutex        g_mx;
@@ -185,8 +187,9 @@ bool InitArena(std::uintptr_t lo, std::uintptr_t hi) {
     }
     if (!g_codeArena) return false;
 
-    g_codeUsed = 0;
-    g_sealed   = false;
+    g_codeUsed      = 0;
+    g_sealed        = false;
+    g_permHookCount = 0;
     std::memset(reinterpret_cast<void*>(g_codeArena), 0xCC, kCodeArenaSize);
     return true;
 }
@@ -198,7 +201,8 @@ bool PreparePermanentDetour5(std::uintptr_t site,
                              void** outOrigTrampoline,
                              const std::uint8_t expected5[5]) {
     std::lock_guard<std::mutex> lk(g_mx);
-    if (!g_codeArena || g_sealed || !site || !detourFn || !outOrigTrampoline || (site & 0x7ULL) != 0) {
+    if (!g_codeArena || g_sealed || g_permHookCount >= kMaxPermHooks ||
+        !site || !detourFn || !outOrigTrampoline || (site & 0x7ULL) != 0) {
         return false;
     }
     const auto* cur = reinterpret_cast<const std::uint8_t*>(site);
@@ -210,11 +214,12 @@ bool PreparePermanentDetour5(std::uintptr_t site,
         return false;
     }
 
-    g_presentHook.valid = true;
-    g_presentHook.active = false;
-    g_presentHook.site  = site;
-    g_presentHook.relay = relay;
-    std::memcpy(g_presentHook.orig5, cur, 5);
+    PermanentHookInfo& h = g_permHooks[g_permHookCount++];
+    h.valid  = true;
+    h.active = false;
+    h.site   = site;
+    h.relay  = relay;
+    std::memcpy(h.orig5, cur, 5);
     return true;
 }
 
@@ -281,7 +286,7 @@ bool PrepareLazyGuardHook(std::uintptr_t site,
 
 bool FinalizeAndInstallPresentHook() {
     std::lock_guard<std::mutex> lk(g_mx);
-    if (!g_codeArena || g_sealed || !g_presentHook.valid) return false;
+    if (!g_codeArena || g_sealed || g_permHookCount == 0 || !g_permHooks[0].valid) return false;
 
     // 1. Seal trampoline arena as PAGE_EXECUTE_READ (strict W^X — zero RWX pages!)
     DWORD oldProt = 0;
@@ -292,17 +297,29 @@ bool FinalizeAndInstallPresentHook() {
     ::FlushInstructionCache(::GetCurrentProcess(), reinterpret_cast<void*>(g_codeArena), kCodeArenaSize);
     g_sealed = true;
 
-    // 2. Install ONLY the 5-byte Present jump! All simulation/collision functions remain 100% vanilla!
-    std::uint8_t jmp5[5]{};
-    jmp5[0] = 0xE9;
-    const auto rel = static_cast<std::int32_t>(
-        static_cast<std::int64_t>(g_presentHook.relay) - static_cast<std::int64_t>(g_presentHook.site + 5U));
-    std::memcpy(jmp5 + 1, &rel, 4);
+    // 2. Install ONLY the permanent 5-byte hooks (Present + KeyboardUpdateState)!
+    //    All simulation/collision/draw functions remain 100% vanilla until engaged!
+    for (std::size_t i = 0; i < g_permHookCount; ++i) {
+        PermanentHookInfo& h = g_permHooks[i];
+        if (!h.valid || !h.site) continue;
+        std::uint8_t jmp5[5]{};
+        jmp5[0] = 0xE9;
+        const auto rel = static_cast<std::int32_t>(
+            static_cast<std::int64_t>(h.relay) - static_cast<std::int64_t>(h.site + 5U));
+        std::memcpy(jmp5 + 1, &rel, 4);
 
-    if (!AtomicSwap5BytesAligned(g_presentHook.site, jmp5)) {
-        return false;
+        if (!AtomicSwap5BytesAligned(h.site, jmp5)) {
+            for (std::size_t r = i; r > 0; --r) {
+                PermanentHookInfo& prev = g_permHooks[r - 1];
+                if (prev.active && prev.site) {
+                    AtomicSwap5BytesAligned(prev.site, prev.orig5);
+                    prev.active = false;
+                }
+            }
+            return false;
+        }
+        h.active = true;
     }
-    g_presentHook.active = true;
     return true;
 }
 
@@ -358,9 +375,12 @@ void RemoveAllHooks() {
             g_dynHooks[i].enabled = false;
         }
     }
-    if (g_presentHook.active && g_presentHook.site) {
-        AtomicSwap5BytesAligned(g_presentHook.site, g_presentHook.orig5);
-        g_presentHook.active = false;
+    for (std::size_t i = g_permHookCount; i > 0; --i) {
+        PermanentHookInfo& h = g_permHooks[i - 1];
+        if (h.active && h.site) {
+            AtomicSwap5BytesAligned(h.site, h.orig5);
+            h.active = false;
+        }
     }
 }
 

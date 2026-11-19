@@ -11,7 +11,7 @@ void OnPresent(std::uintptr_t exeBase,
                std::uintptr_t d3dRender,
                bool visEnabled,
                freeze::Mode freezeMode,
-               app::FilterMode filterMode,
+               const app::ViewFilterState& viewState,
                const app::Config& cfg,
                bool showStartupToast);
 

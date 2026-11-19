@@ -205,6 +205,8 @@ Config LoadConfig() {
         else if (key == "STARTVISON") cfg.startVisOn = std::atoi(val.c_str()) != 0;
         else if (key == "KEEPHITBOXESACTIVE" || key == "PERSISTHITBOXES" || key == "KEEP_HITBOXES_ACTIVE")
             cfg.keepHitboxesActive = std::atoi(val.c_str()) != 0;
+        else if (key == "BLOCKCAMERAKEYS" || key == "DISABLECAMERAKEYS" || key == "BLOCK_CAMERA_KEYS")
+            cfg.blockCameraKeys = std::atoi(val.c_str()) != 0;
         else if (key == "SHOWHUDBANNER") cfg.showHudBanner = std::atoi(val.c_str()) != 0;
         else if (key == "LINETHICKNESS") {
             float t = static_cast<float>(std::atof(val.c_str()));
@@ -212,25 +214,113 @@ Config LoadConfig() {
         } else if (key == "OPACITYSCALE") {
             float o = static_cast<float>(std::atof(val.c_str()));
             if (o >= 0.1f && o <= 1.5f) cfg.opacityScale = o;
+        } else if (key == "SBCSURFACEOPACITY" || key == "SBC_SURFACE_OPACITY" || key == "SBCSURFOPACITY") {
+            float so = static_cast<float>(std::atof(val.c_str()));
+            if (so >= 0.1f && so <= 3.0f) cfg.sbcSurfaceOpacity = so;
         } else if (key == "HDRNITS" || key == "HDR_NITS") {
             float n = static_cast<float>(std::atof(val.c_str()));
             if (n == 0.0f || (n >= 40.0f && n <= 1000.0f)) cfg.hdrNits = n;
+        } else if (key == "CATEGORYMASK" || key == "DEFAULTMASK" || key == "VISMASK") {
+            long m = std::strtol(val.c_str(), nullptr, 0);
+            if (m >= 0 && m <= 0xFF) cfg.defaultVisMask = static_cast<std::uint32_t>(m);
+        } else if (key == "SBCRADIUSMETERS" || key == "SBC_RADIUS_METERS") {
+            float r = static_cast<float>(std::atof(val.c_str()));
+            if (r <= 18.0f) cfg.defaultSbcRadiusIdx = 0;
+            else if (r <= 35.0f) cfg.defaultSbcRadiusIdx = 1;
+            else if (r <= 60.0f) cfg.defaultSbcRadiusIdx = 2;
+            else cfg.defaultSbcRadiusIdx = 3;
+        } else if (key == "STARTHIDEMONSTER" || key == "HIDEMONSTERMESH") {
+            cfg.startHideMonster = std::atoi(val.c_str()) != 0;
+        } else if (key == "STARTHIDESTAGE" || key == "HIDESTAGEMESH" || key == "HIDEMAPMESH") {
+            int s = std::atoi(val.c_str());
+            if (s >= 0 && s < static_cast<int>(StageHideMode::Count)) {
+                cfg.startStageHide = static_cast<StageHideMode>(s);
+            } else if (s != 0) {
+                cfg.startStageHide = StageHideMode::KeepInteract;
+            }
+        } else if (key == "STARTBACKDROP" || key == "BACKDROPMODE") {
+            int b = std::atoi(val.c_str());
+            if (b >= 0 && b < static_cast<int>(BackdropMode::Count)) {
+                cfg.startBackdrop = static_cast<BackdropMode>(b);
+            }
+        } else if (key == "DEPTHGUIDEMODE" || key == "STARTDEPTHMODE" || key == "SBCSTYLE") {
+            int d = std::atoi(val.c_str());
+            if (d >= 0 && d < static_cast<int>(DepthGuideMode::Count)) {
+                cfg.startDepthMode = static_cast<DepthGuideMode>(d);
+            }
         }
     }
 
-    Log("config: loaded debug_hitbox.ini (enabled=%d, vkVis=0x%02X, vkFreeze=0x%02X, vkWorld=0x%02X, vkKeep=0x%02X, vkStep=0x%02X, vkFilter=0x%02X)",
+    Log("config: loaded debug_hitbox.ini (enabled=%d, vkVis=0x%02X, vkFreeze=0x%02X, vkWorld=0x%02X, vkKeep=0x%02X, vkStep=0x%02X, vkPanel=0x%02X, mask=0x%02X)",
         cfg.enabled ? 1 : 0, cfg.vkToggleVis, cfg.vkToggleFreeze, cfg.vkFreezeOthers,
-        cfg.vkPersistHitbox, cfg.vkStepFrame, cfg.vkCycleFilter);
+        cfg.vkPersistHitbox, cfg.vkStepFrame, cfg.vkCycleFilter, cfg.defaultVisMask);
     return cfg;
 }
 
-const char* FilterModeName(FilterMode m) {
+std::uint32_t PresetMask(PresetId p) noexcept {
+    switch (p) {
+        case PresetId::Combat:   return kCatMaskCombat;
+        case PresetId::PlEmOnly: return kCatMaskPlEmOnly;
+        case PresetId::MapOnly:  return kCatMaskMapOnly;
+        case PresetId::Hitbox:   return kCatMaskHitbox;
+        case PresetId::Hurtbox:  return kCatMaskHurtbox;
+        case PresetId::All:      return kCatMaskAll;
+        default:                 return kCatMaskCombat;
+    }
+}
+
+const char* PresetName(PresetId p) noexcept {
+    switch (p) {
+        case PresetId::Combat:   return "PL+EM COMBAT";
+        case PresetId::PlEmOnly: return "PL+EM ONLY";
+        case PresetId::MapOnly:  return "MAP ONLY";
+        case PresetId::Hitbox:   return "HITBOX ONLY";
+        case PresetId::Hurtbox:  return "HURTBOX ONLY";
+        case PresetId::All:      return "ALL (8/8)";
+        default:                 return "PL+EM COMBAT";
+    }
+}
+
+const char* MatchPresetName(std::uint32_t visMask) noexcept {
+    const std::uint32_t m = visMask & kCatMaskAll;
+    if (m == kCatMaskCombat)   return "PL+EM COMBAT";
+    if (m == kCatMaskPlEmOnly) return "PL+EM ONLY";
+    if (m == kCatMaskMapOnly)  return "MAP ONLY";
+    if (m == kCatMaskHitbox)   return "HITBOX ONLY";
+    if (m == kCatMaskHurtbox)  return "HURTBOX ONLY";
+    if (m == kCatMaskAll)      return "ALL (8/8)";
+    if (m == 0)                return "NONE (0/8)";
+    return "CUSTOM";
+}
+
+const char* StageHideModeName(StageHideMode m) noexcept {
     switch (m) {
-        case FilterMode::Combat:  return "COMBAT";
-        case FilterMode::Hitbox:  return "HITBOX";
-        case FilterMode::Hurtbox: return "HURTBOX";
-        case FilterMode::All:     return "ALL";
-        default:                  return "COMBAT";
+        case StageHideMode::Off:          return "OFF";
+        case StageHideMode::KeepInteract: return "KEEP INTERACT";
+        case StageHideMode::HideAll:      return "HIDE ALL MAP";
+        default:                          return "OFF";
+    }
+}
+
+const char* BackdropModeName(BackdropMode m) noexcept {
+    switch (m) {
+        case BackdropMode::Off:       return "OFF";
+        case BackdropMode::HidePlVfx: return "HIDE PL/VFX";
+        case BackdropMode::HideAll3D: return "HIDE ALL 3D";
+        case BackdropMode::DimScrim:  return "DIM 45%";
+        default:                      return "OFF";
+    }
+}
+
+const char* DepthGuideModeName(DepthGuideMode m) noexcept {
+    switch (m) {
+        case DepthGuideMode::Auto:          return "SEMI 3D+RINGS";
+        case DepthGuideMode::Opaque:        return "OPAQUE 3D+RING";
+        case DepthGuideMode::OpaqueNoRings: return "OPAQUE 3D ONLY";
+        case DepthGuideMode::AlwaysRings:   return "SEMI+RINGS ON";
+        case DepthGuideMode::NoRings:       return "SEMI 3D ONLY";
+        case DepthGuideMode::RawWire:       return "RAW WIREFRAME";
+        default:                            return "SEMI 3D+RINGS";
     }
 }
 

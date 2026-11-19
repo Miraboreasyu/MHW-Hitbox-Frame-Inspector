@@ -6,11 +6,12 @@ namespace hook {
 
 // Dynamic on-demand hooks that stay 100% UNPATCHED in MonsterHunterWorld.exe
 // during normal gameplay (and even while [U] Hitbox display is ON!), and only
-// patch/unpatch atomically when World Freeze [K] or Step [O] is engaged!
+// patch/unpatch atomically when World Freeze [K], Step [O], or Mesh Hiding is engaged!
 enum DynHookId : std::uint8_t {
     kDynGenericMove = 0, // cUnit::genericMove (0x142228F50, 5-byte single insn 48 89 5C 24 08)
     kDynHitDispatch = 1, // HitDispatch        (0x1412DD7C0, 5-byte single insn 48 89 5C 24 10)
-    kDynCount       = 2
+    kDynUnitDraw    = 2, // sUnit::draw        (0x14221A050, 5-byte single insn 48 89 5C 24 18)
+    kDynCount       = 3
 };
 
 bool InitArena(std::uintptr_t lo, std::uintptr_t hi);

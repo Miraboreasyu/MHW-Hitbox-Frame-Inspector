@@ -33,6 +33,7 @@ cl.exe /nologo /std:c++17 /O2 /GL /GR- ^
     "%SRCDIR%\hook.cpp" ^
     "%SRCDIR%\log_config.cpp" ^
     "%SRCDIR%\game_freeze.cpp" ^
+    "%SRCDIR%\scene_visibility.cpp" ^
     "%SRCDIR%\collision_collector.cpp" ^
     "%SRCDIR%\overlay_renderer.cpp" ^
     /Fe:"%OUTDIR%\debug_hitbox.dll" ^
