@@ -146,10 +146,10 @@ void EnsurePaths() {
     if (slash) {
         *slash = '\0';
         g_dllDir = path;
-        g_logPath = g_dllDir + "\\debug_hitbox.log";
+        g_logPath = g_dllDir + "\\mhw_hfi.log";
     } else {
         g_dllDir = ".";
-        g_logPath = "debug_hitbox.log";
+        g_logPath = "mhw_hfi.log";
     }
 }
 
@@ -221,10 +221,10 @@ void InitLog() {
         std::fclose(g_logFile);
         g_logFile = nullptr;
     }
-    // Preserve previous non-empty session log as debug_hitbox.prev.log before truncating
+    // Preserve previous non-empty session log as mhw_hfi.prev.log before truncating
     const std::string prevPath = (g_dllDir.empty() || g_dllDir == ".")
-                                     ? std::string("debug_hitbox.prev.log")
-                                     : (g_dllDir + "\\debug_hitbox.prev.log");
+                                     ? std::string("mhw_hfi.prev.log")
+                                     : (g_dllDir + "\\mhw_hfi.prev.log");
     WIN32_FILE_ATTRIBUTE_DATA fad{};
     if (::GetFileAttributesExA(g_logPath.c_str(), GetFileExInfoStandard, &fad) &&
         (fad.nFileSizeHigh > 0 || fad.nFileSizeLow > 0)) {
@@ -235,7 +235,7 @@ void InitLog() {
     if (g_logFile) {
         SYSTEMTIME st{};
         ::GetLocalTime(&st);
-        std::fprintf(g_logFile, "[%04u-%02u-%02u %02u:%02u:%02u.%03u] debug_hitbox plugin attached (dir=%s)\n",
+        std::fprintf(g_logFile, "[%04u-%02u-%02u %02u:%02u:%02u.%03u] mhw_hfi plugin attached (dir=%s)\n",
                      st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds,
                      g_dllDir.c_str());
         std::fflush(g_logFile);
@@ -279,14 +279,14 @@ std::string DllDirectory() {
 
 Config LoadConfig() {
     Config cfg;
-    const std::string iniPath = DllDirectory() + "\\debug_hitbox.ini";
+    const std::string iniPath = DllDirectory() + "\\mhw_hfi.ini";
     {
         std::lock_guard<std::mutex> lk(g_hotCfgMx);
         g_lastIniStamp = QueryIniStamp(iniPath);
     }
     std::string content;
     if (!ReadIniFileContent(iniPath, content)) {
-        Log("config: no debug_hitbox.ini found; using defaults (Vis=U, Freeze=I, World=K, Keep=J, Step=O, Filter=P; chat U=\"%s\", I=\"%s\", K=\"%s\", O=\"%s\", J=\"%s\", P=\"%s\")",
+        Log("config: no mhw_hfi.ini found; using defaults (Vis=U, Freeze=I, World=K, Keep=J, Step=O, Filter=P; chat U=\"%s\", I=\"%s\", K=\"%s\", O=\"%s\", J=\"%s\", P=\"%s\")",
             cfg.chat.cmdVis.c_str(), cfg.chat.cmdFreeze.c_str(), cfg.chat.cmdWorldFreeze.c_str(),
             cfg.chat.cmdStep.c_str(), cfg.chat.cmdKeepHitbox.c_str(), cfg.chat.cmdPanel.c_str());
         return cfg;
@@ -412,7 +412,7 @@ Config LoadConfig() {
         }
     }
 
-    Log("config: loaded debug_hitbox.ini (enabled=%d, vkVis=0x%02X, vkFreeze=0x%02X, vkWorld=0x%02X, vkKeep=0x%02X, vkStep=0x%02X, vkPanel=0x%02X, mask=0x%02X; chat en=%d cs=%d U=\"%s\" I=\"%s\" K=\"%s\" O=\"%s\" J=\"%s\" P=\"%s\" pad=%d)",
+    Log("config: loaded mhw_hfi.ini (enabled=%d, vkVis=0x%02X, vkFreeze=0x%02X, vkWorld=0x%02X, vkKeep=0x%02X, vkStep=0x%02X, vkPanel=0x%02X, mask=0x%02X; chat en=%d cs=%d U=\"%s\" I=\"%s\" K=\"%s\" O=\"%s\" J=\"%s\" P=\"%s\" pad=%d)",
         cfg.enabled ? 1 : 0, cfg.vkToggleVis, cfg.vkToggleFreeze, cfg.vkFreezeOthers,
         cfg.vkPersistHitbox, cfg.vkStepFrame, cfg.vkCycleFilter, cfg.defaultVisMask,
         cfg.chat.enabled ? 1 : 0, cfg.chat.caseSensitive ? 1 : 0,
@@ -423,7 +423,7 @@ Config LoadConfig() {
 }
 
 bool HotReloadRuntimeConfig(ChatCommandConfig& ioChat, bool& ioGamepadPanel) {
-    const std::string iniPath = DllDirectory() + "\\debug_hitbox.ini";
+    const std::string iniPath = DllDirectory() + "\\mhw_hfi.ini";
     const IniStamp curStamp = QueryIniStamp(iniPath);
 
     std::lock_guard<std::mutex> lk(g_hotCfgMx);
@@ -472,7 +472,7 @@ bool HotReloadRuntimeConfig(ChatCommandConfig& ioChat, bool& ioGamepadPanel) {
     ioChat         = nextChat;
     ioGamepadPanel = nextGamepad;
 
-    Log("config: hot-reloaded debug_hitbox.ini (%s; chat en=%d cs=%d U=\"%s\" I=\"%s\" K=\"%s\" O=\"%s\" J=\"%s\" P=\"%s\" pad=%d)",
+    Log("config: hot-reloaded mhw_hfi.ini (%s; chat en=%d cs=%d U=\"%s\" I=\"%s\" K=\"%s\" O=\"%s\" J=\"%s\" P=\"%s\" pad=%d)",
         curStamp.exists ? "updated" : "removed -> defaults",
         nextChat.enabled ? 1 : 0, nextChat.caseSensitive ? 1 : 0,
         nextChat.cmdVis.c_str(), nextChat.cmdFreeze.c_str(), nextChat.cmdWorldFreeze.c_str(),

@@ -1,7 +1,7 @@
 @echo off
 :: ============================================================================
-:: Build MHW Debug Hitbox Mod (Stracker's Loader plugin, DX11 + DX12)
-:: Output: build\debug_hitbox.dll -> nativePC\plugins\debug_hitbox.dll
+:: Build MHW Hitbox & Frame Inspector (Stracker's Loader plugin, DX11 + DX12)
+:: Output: build\mhw_hfi.dll -> nativePC\plugins\mhw_hfi.dll
 :: ============================================================================
 
 setlocal
@@ -19,7 +19,7 @@ set "SRCDIR=%~dp0src"
 set "OUTDIR=%~dp0build"
 if not exist "%OUTDIR%" mkdir "%OUTDIR%"
 
-echo ===== Building MHW Debug Hitbox Mod (15.23 DX11+DX12) =====
+echo ===== Building MHW Hitbox ^& Frame Inspector (15.23 DX11+DX12) =====
 echo Source: %SRCDIR%
 echo Output: %OUTDIR%
 echo.
@@ -36,11 +36,11 @@ cl.exe /nologo /std:c++17 /O2 /GL /GR- ^
     "%SRCDIR%\scene_visibility.cpp" ^
     "%SRCDIR%\collision_collector.cpp" ^
     "%SRCDIR%\overlay_renderer.cpp" ^
-    /Fe:"%OUTDIR%\debug_hitbox.dll" ^
+    /Fe:"%OUTDIR%\mhw_hfi.dll" ^
     /Fo:"%OUTDIR%\\" ^
     /LD ^
     /link kernel32.lib user32.lib uuid.lib /OPT:REF /OPT:ICF ^
-    /OUT:"%OUTDIR%\debug_hitbox.dll"
+    /OUT:"%OUTDIR%\mhw_hfi.dll"
 
 if %ERRORLEVEL% NEQ 0 (
     echo.
@@ -50,5 +50,5 @@ if %ERRORLEVEL% NEQ 0 (
 
 echo.
 echo ===== BUILD SUCCESS =====
-echo Output: %OUTDIR%\debug_hitbox.dll
+echo Output: %OUTDIR%\mhw_hfi.dll
 exit /b 0

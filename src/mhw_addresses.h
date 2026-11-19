@@ -1,7 +1,7 @@
 #pragma once
 // ============================================================================
 //  Verified MHW:I 15.23 (Steam build 15539686, ImageBase 0x140000000) RVAs &
-//  struct offsets for Pure Debug Hitbox & Freeze Mod (debug_hitbox.dll).
+//  struct offsets for MHW Hitbox & Frame Inspector (mhw_hfi.dll).
 // ============================================================================
 #include <cstddef>
 #include <cstdint>

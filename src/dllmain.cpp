@@ -1,8 +1,8 @@
 // ============================================================================
-//  MHW:I 15.23 Real-Time Collision/Hitbox Visualizer & Zero-Delay Freeze Mod
-//  Loaded via Stracker's Loader: nativePC\plugins\debug_hitbox.dll
+//  MHW Hitbox & Frame Inspector (MHW:I 15.23, DX11 + DX12 + HDR)
+//  Loaded via Stracker's Loader: nativePC\plugins\mhw_hfi.dll
 //
-//  Default Hotkeys (customizable in optional debug_hitbox.ini):
+//  Default Hotkeys (customizable in optional mhw_hfi.ini):
 //    U       : Master toggle for collision / scene inspection view
 //    I       : Instant zero-delay full game freeze / resume
 //    K       : Pause everything except the Player (World Freeze / Resume)
@@ -1120,7 +1120,7 @@ __declspec(noinline) void ProcessPresentWork(std::uintptr_t d3dRender) {
 
         if ((edges & kKeyFilter) != 0) {
             if (!g_viewState.panelOpen) {
-                // Opportunistically hot-reload debug_hitbox.ini on panel open (zero polling!)
+                // Opportunistically hot-reload mhw_hfi.ini on panel open (zero polling!)
                 RefreshHotRuntimeConfig();
             }
             g_viewState.panelOpen = !g_viewState.panelOpen;
@@ -1390,7 +1390,7 @@ DWORD WINAPI InitWorker(LPVOID) {
     app::InitLog();
     g_cfg = app::LoadConfig();
     if (!g_cfg.enabled) {
-        app::Log("init: disabled via debug_hitbox.ini");
+        app::Log("init: disabled via mhw_hfi.ini");
         return 0;
     }
 

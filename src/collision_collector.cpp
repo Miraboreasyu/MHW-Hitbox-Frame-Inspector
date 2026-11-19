@@ -5889,7 +5889,7 @@ void BuildOverlayFrame(std::uintptr_t exeBase,
 
         if (!visEnabled && !anyFreeze && !viewState.panelOpen && !anySceneMod && showStartupToast) {
             std::snprintf(line1, sizeof(line1),
-                          "DEBUG HITBOX READY  |  [U] VIS  [I] FREEZE  [K] WORLD  [J] KEEP  [O] +1F  [P] PANEL");
+                          "MHW HFI READY  |  [U] VIS  [I] FREEZE  [K] WORLD  [J] KEEP  [O] +1F  [P] PANEL");
         } else {
             char mapSeg[48]{};
             if ((viewState.visMask & (app::kCatEnvObject | app::kCatStageMesh)) != 0) {

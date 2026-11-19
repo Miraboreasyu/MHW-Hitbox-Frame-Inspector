@@ -208,7 +208,7 @@ void CloseLog();
 void Log(const char* fmt, ...);
 std::string DllDirectory();
 Config LoadConfig();
-// Checks debug_hitbox.ini mtime/size (zero polling; called only on chat send / panel open)
+// Checks mhw_hfi.ini mtime/size (zero polling; called only on chat send / panel open)
 // and hot-reloads ChatCommands, ChatCaseSensitive, ChatCmd*, and GamepadPanel when changed.
 bool HotReloadRuntimeConfig(ChatCommandConfig& ioChat, bool& ioGamepadPanel);
 

@@ -1,4 +1,4 @@
-# MHW:I Debug Hitbox Mod (15.23)
+# MHW Hitbox & Frame Inspector (15.23)
 
 [中文说明](#中文说明) | [English Guide](#english-guide)
 
@@ -14,8 +14,8 @@
 2. 前置插件：**Stracker's Loader**。
 3. 将压缩包内的 `nativePC` 文件夹解压至游戏根目录，确认最终路径为：
    ```text
-   <游戏根目录>\nativePC\plugins\debug_hitbox.dll
-   <游戏根目录>\nativePC\plugins\debug_hitbox.ini
+   <游戏根目录>\nativePC\plugins\mhw_hfi.dll
+   <游戏根目录>\nativePC\plugins\mhw_hfi.ini
    ```
 
 ---
@@ -56,7 +56,7 @@
 - **逐帧步进（+1 Frame）**：在全局冻结或世界冻结下精确推进 1 帧。
 
 #### 5. 游戏内聊天 / 快捷轮盘定型文触发与手柄操控面板
-- **聊天 / 轮盘定型文激活**：通过游戏内聊天或快捷轮盘定型文触发 6 个核心功能，绕开手柄按键紧张的限制；仅响应本地玩家主动发言，支持连续重复发送同一条定型文，且支持在游戏运行中修改 `debug_hitbox.ini` 后免重启热刷新。
+- **聊天 / 轮盘定型文激活**：通过游戏内聊天或快捷轮盘定型文触发 6 个核心功能，绕开手柄按键紧张的限制；仅响应本地玩家主动发言，支持连续重复发送同一条定型文，且支持在游戏运行中修改 `mhw_hfi.ini` 后免重启热刷新。
 - **手柄操控面板**：打开筛选面板后，可直接使用手柄十字键与 `A`（PS `×`）键浏览和修改所有选项，面板展开期间自动避免误触翻滚与道具栏滚动，按住 `LB` 呼出快捷轮盘或打开聊天框打字时自动放行。
 
 ---
@@ -76,7 +76,7 @@
 | **`Shift + P`** | 不打开面板直接循环切换预设范围 |
 
 > - 打开游戏内聊天框、搜索框或起名输入文字时，插件会自动暂停拦截全部热键。
-> - 插件启用期间默认屏蔽游戏原生 `O / K / L / ;` 键盘转视角键（打字时自动放行），避免按 `K` / `O` 时误转镜头；可在 `debug_hitbox.ini` 中将 `BlockCameraKeys` 设为 `0` 恢复。
+> - 插件启用期间默认屏蔽游戏原生 `O / K / L / ;` 键盘转视角键（打字时自动放行），避免按 `K` / `O` 时误转镜头；可在 `mhw_hfi.ini` 中将 `BlockCameraKeys` 设为 `0` 恢复。
 
 #### 2. 交互式 `[P]` 面板操作（主面板）
 
@@ -145,14 +145,14 @@
 | **`J`** | 开关单次判定框常驻 | `$keep_hitbox` | `ChatCmdKeepHitbox` |
 | **`P`** | 打开 / 关闭筛选面板 | `$show_panel` | `ChatCmdPanel` |
 
-- **默认不区分英文大小写**（`ChatCaseSensitive=0`），可在 `debug_hitbox.ini` 中改为 `1` 开启严格区分大小写。
-- **自定义与热刷新**：游戏运行期间随时编辑并保存 `nativePC\plugins\debug_hitbox.ini`（中文/日文定型文请保存为 UTF-8 编码），下一次发聊天/定型文或打开面板时即时生效，无需重启游戏。将任意一项留空或填 `NONE` 可单独禁用该命令。
+- **默认不区分英文大小写**（`ChatCaseSensitive=0`），可在 `mhw_hfi.ini` 中改为 `1` 开启严格区分大小写。
+- **自定义与热刷新**：游戏运行期间随时编辑并保存 `nativePC\plugins\mhw_hfi.ini`（中文/日文定型文请保存为 UTF-8 编码），下一次发聊天/定型文或打开面板时即时生效，无需重启游戏。将任意一项留空或填 `NONE` 可单独禁用该命令。
 
 ---
 
-### 配置文件（`nativePC\plugins\debug_hitbox.ini`）
+### 配置文件（`nativePC\plugins\mhw_hfi.ini`）
 
-压缩包中已附带包含全部默认值的 `debug_hitbox.ini`。所有配置项均可选，缺省时使用默认值：
+压缩包中已附带包含全部默认值的 `mhw_hfi.ini`。所有配置项均可选，缺省时使用默认值：
 
 | 配置项 | 默认值 | 说明 |
 |---|---|---|
@@ -185,8 +185,8 @@ A real-time hitbox/hurtbox visualization, monster part hitzone & Clutch Claw sof
 2. Prerequisite plugin: **Stracker's Loader**.
 3. Extract the `nativePC` folder from the archive into your game root directory and verify the final paths:
    ```text
-   <MHW Root>\nativePC\plugins\debug_hitbox.dll
-   <MHW Root>\nativePC\plugins\debug_hitbox.ini
+   <MHW Root>\nativePC\plugins\mhw_hfi.dll
+   <MHW Root>\nativePC\plugins\mhw_hfi.ini
    ```
 
 ---
@@ -227,7 +227,7 @@ All modes preserve the in-game player UI and normal map interactions:
 - **Single-Frame Step (+1 Frame)**: Advances exactly 1 frame while in Full Freeze or World Freeze.
 
 #### 5. In-Game Chat / Radial Shoutout Triggers & Controller Panel Control
-- **Chat / Radial Shoutout Activation**: Trigger the 6 core functions via in-game chat or Radial Menu custom shoutouts, bypassing tight controller button budgets; responds only to local player messages, supports sending the same shoutout consecutively to trigger repeatedly, and supports hot-reloading edits to `debug_hitbox.ini` while the game is running without restarting.
+- **Chat / Radial Shoutout Activation**: Trigger the 6 core functions via in-game chat or Radial Menu custom shoutouts, bypassing tight controller button budgets; responds only to local player messages, supports sending the same shoutout consecutively to trigger repeatedly, and supports hot-reloading edits to `mhw_hfi.ini` while the game is running without restarting.
 - **Controller Panel Navigation**: Once the filter panel is open, browse and adjust all options directly with the controller D-Pad and `A` (PS `×`). While the panel is open, accidental rolls and item bar scrolling are prevented automatically; holding `LB` for the Radial Menu or opening a chat/text input automatically passes inputs through to the game.
 
 ---
@@ -247,7 +247,7 @@ All modes preserve the in-game player UI and normal map interactions:
 | **`Shift + P`** | Cycle scope presets directly without opening the panel |
 
 > - All mod hotkeys automatically pause while typing in in-game chat, search, or naming boxes.
-> - While the mod is active, native keyboard camera rotation keys `O / K / L / ;` are blocked by default (passed through automatically when typing) so pressing `K` or `O` never nudges the camera; set `BlockCameraKeys=0` in `debug_hitbox.ini` to restore them.
+> - While the mod is active, native keyboard camera rotation keys `O / K / L / ;` are blocked by default (passed through automatically when typing) so pressing `K` or `O` never nudges the camera; set `BlockCameraKeys=0` in `mhw_hfi.ini` to restore them.
 
 #### 2. Interactive `[P]` Panel Operation (Main Panel)
 
@@ -316,14 +316,14 @@ Supports triggering ONLY the 6 core main hotkeys via **exact full-string match**
 | **`J`** | Toggle Keep Single-Trigger Hitboxes Active | `$keep_hitbox` | `ChatCmdKeepHitbox` |
 | **`P`** | Open / close filter panel | `$show_panel` | `ChatCmdPanel` |
 
-- **Case-insensitive for ASCII letters by default** (`ChatCaseSensitive=0`); change to `1` in `debug_hitbox.ini` to require strict case-sensitive matching.
-- **Customization & Hot-Reload**: Edit and save `nativePC\plugins\debug_hitbox.ini` at any time while the game is running (save as UTF-8 when using Chinese/Japanese shoutouts). Changes take effect on the very next chat/shoutout or panel open without restarting the game. Leave any entry empty or set it to `NONE` to disable that individual command.
+- **Case-insensitive for ASCII letters by default** (`ChatCaseSensitive=0`); change to `1` in `mhw_hfi.ini` to require strict case-sensitive matching.
+- **Customization & Hot-Reload**: Edit and save `nativePC\plugins\mhw_hfi.ini` at any time while the game is running (save as UTF-8 when using Chinese/Japanese shoutouts). Changes take effect on the very next chat/shoutout or panel open without restarting the game. Leave any entry empty or set it to `NONE` to disable that individual command.
 
 ---
 
-### Configuration File (`nativePC\plugins\debug_hitbox.ini`)
+### Configuration File (`nativePC\plugins\mhw_hfi.ini`)
 
-A default `debug_hitbox.ini` containing all default values is included in the archive. Every entry is optional and uses its default value if omitted:
+A default `mhw_hfi.ini` containing all default values is included in the archive. Every entry is optional and uses its default value if omitted:
 
 | Option | Default | Description |
 |---|---|---|
