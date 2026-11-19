@@ -70,7 +70,8 @@ float4 PSDepthClip(PSIn i) : SV_TARGET {
         if (sd > 1e-6f) {
             float dSceneCm = gProjM32 / max(sd + gProjM22, 1e-7f);
             float dSbcCm   = gProjM32 / max(i.pos.z + gProjM22, 1e-7f);
-            if (dSceneCm <= dSbcCm + gDepthBiasCm) {
+            float tolCm    = max(gDepthBiasCm, 0.012f * dSbcCm);
+            if (dSceneCm + tolCm <= dSbcCm) {
                 discard;
             }
         }
@@ -495,41 +496,10 @@ void ResolveEngineSceneTexturesSEH(std::uintptr_t exeBase, bool isDx12, EngineSc
             const bool ok1 = (rw1 != postUiTex) && (rw1 != rw0) &&
                              ExtractNDrawTexture(rw1, isDx12, 1.0f, t1W, t1H, a1W, a1H, s1_11, r1_12, c1_12, st1_12);
 
-            // On DX12, the render thread leaves this frame's puVar21 in COPY_SOURCE or PIXEL_SHADER_RESOURCE
-            // while leaving last frame's tHistory in NON_PIXEL_SHADER_RESOURCE!
-            constexpr D3D12_RESOURCE_STATES kCurTaaMask =
-                D3D12_RESOURCE_STATE_COPY_SOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-            const bool pick0Only = ok0 && (!ok1 || (isDx12 && ((st0_12 & kCurTaaMask) != 0) && ((st1_12 & kCurTaaMask) == 0)));
-            const bool pick1Only = ok1 && (!ok0 || (isDx12 && ((st1_12 & kCurTaaMask) != 0) && ((st0_12 & kCurTaaMask) == 0)));
-
-            if (pick0Only) {
-                out->hasUi          = true;
-                out->dualPreUi      = false;
-                out->uiSourceKind   = 1;
-                out->preUiActW      = a0W;
-                out->preUiActH      = a0H;
-                out->preUiUvScaleX  = (t0W > 0.0f) ? (a0W / t0W) : 1.0f;
-                out->preUiUvScaleY  = (t0H > 0.0f) ? (a0H / t0H) : 1.0f;
-                out->preUi0Srv11    = out->preUi1Srv11    = s0_11;
-                out->preUi0Res12    = out->preUi1Res12    = r0_12;
-                out->preUi0SrvCpu12 = out->preUi1SrvCpu12 = c0_12;
-                out->preUi0State12  = out->preUi1State12  = st0_12;
-                return;
-            }
-            if (pick1Only) {
-                out->hasUi          = true;
-                out->dualPreUi      = false;
-                out->uiSourceKind   = 1;
-                out->preUiActW      = a1W;
-                out->preUiActH      = a1H;
-                out->preUiUvScaleX  = (t1W > 0.0f) ? (a1W / t1W) : 1.0f;
-                out->preUiUvScaleY  = (t1H > 0.0f) ? (a1H / t1H) : 1.0f;
-                out->preUi0Srv11    = out->preUi1Srv11    = s1_11;
-                out->preUi0Res12    = out->preUi1Res12    = r1_12;
-                out->preUi0SrvCpu12 = out->preUi1SrvCpu12 = c1_12;
-                out->preUi0State12  = out->preUi1State12  = st1_12;
-                return;
-            }
+            // Always bind BOTH rwOutput[0] & rwOutput[1] when valid (dualPreUi = true)!
+            // MHW encodes GENERIC_READ (0xFF -> 0xAC3) on tHistory as well as COPY_SOURCE/PSR, so single-slot
+            // state heuristics can pick last frame's tHistory and cause PSRestoreUI to erase Opaque .sbc during
+            // camera motion. With dualPreUi, min(diff(post, rw0), diff(post, rw1)) is identically 0.0 on all non-UI!
             if (ok0 && ok1) {
                 out->hasUi          = true;
                 out->dualPreUi      = true;
@@ -546,6 +516,34 @@ void ResolveEngineSceneTexturesSEH(std::uintptr_t exeBase, bool isDx12, EngineSc
                 out->preUi1Res12    = r1_12;
                 out->preUi1SrvCpu12 = c1_12;
                 out->preUi1State12  = st1_12;
+                return;
+            }
+            if (ok0) {
+                out->hasUi          = true;
+                out->dualPreUi      = false;
+                out->uiSourceKind   = 1;
+                out->preUiActW      = a0W;
+                out->preUiActH      = a0H;
+                out->preUiUvScaleX  = (t0W > 0.0f) ? (a0W / t0W) : 1.0f;
+                out->preUiUvScaleY  = (t0H > 0.0f) ? (a0H / t0H) : 1.0f;
+                out->preUi0Srv11    = out->preUi1Srv11    = s0_11;
+                out->preUi0Res12    = out->preUi1Res12    = r0_12;
+                out->preUi0SrvCpu12 = out->preUi1SrvCpu12 = c0_12;
+                out->preUi0State12  = out->preUi1State12  = st0_12;
+                return;
+            }
+            if (ok1) {
+                out->hasUi          = true;
+                out->dualPreUi      = false;
+                out->uiSourceKind   = 1;
+                out->preUiActW      = a1W;
+                out->preUiActH      = a1H;
+                out->preUiUvScaleX  = (t1W > 0.0f) ? (a1W / t1W) : 1.0f;
+                out->preUiUvScaleY  = (t1H > 0.0f) ? (a1H / t1H) : 1.0f;
+                out->preUi0Srv11    = out->preUi1Srv11    = s1_11;
+                out->preUi0Res12    = out->preUi1Res12    = r1_12;
+                out->preUi0SrvCpu12 = out->preUi1SrvCpu12 = c1_12;
+                out->preUi0State12  = out->preUi1State12  = st1_12;
                 return;
             }
         }
@@ -1360,9 +1358,10 @@ OverlayConstants MakeOverlayConstants(float screenW,
                                       const EngineSceneTextures& engTex,
                                       bool visEnabled,
                                       const app::ViewFilterState& viewState) noexcept {
-    const bool activeScope   = visEnabled || viewState.panelOpen;
-    const bool hideAll3D     = activeScope && (viewState.backdrop == app::BackdropMode::HideAll3D);
-    const bool hideStage     = activeScope && (viewState.stageHide != app::StageHideMode::Off);
+    const bool hideAll3D     = visEnabled && (viewState.backdrop == app::BackdropMode::HideAll3D);
+    const bool hideStage     = visEnabled && (viewState.stageHide != app::StageHideMode::Off);
+    const bool isOpaqueSbc   = (viewState.depthMode == app::DepthGuideMode::Opaque ||
+                                viewState.depthMode == app::DepthGuideMode::OpaqueNoRings);
     const bool useSceneDepth = engTex.hasDepth && !hideAll3D;
     const bool exactLoad     = engTex.hasUi &&
                                std::fabs(engTex.postUiActW - screenW) < 0.5f &&
@@ -1390,7 +1389,10 @@ OverlayConstants MakeOverlayConstants(float screenW,
     cb.preUiUvScaleY  = engTex.preUiUvScaleY;
     cb.projM32        = stats.projM32;
     cb.projM22        = stats.projM22;
-    cb.depthBiasCm    = hideStage ? 6.0f : -24.0f;
+    // Positive foreground depth margin (cm): scene pixel only occludes .sbc when dSceneCm + tolCm <= dSbcCm.
+    // Fixes prior +6cm sign bug in KeepInteract/HideAll that discarded .sbc faces flush with interactive props,
+    // and prevents minor 3D visual dirt/grass bumps from punching holes in Opaque .sbc when Hide Map is OFF.
+    cb.depthBiasCm    = hideStage ? 12.0f : (isOpaqueSbc ? 45.0f : 24.0f);
     cb.flags          = flags;
     return cb;
 }

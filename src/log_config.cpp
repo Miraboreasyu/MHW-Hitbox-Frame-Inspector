@@ -13,9 +13,126 @@ namespace app {
 namespace {
 
 std::mutex g_logMx;
+std::mutex g_hotCfgMx;
 std::string g_logPath;
 std::string g_dllDir;
 FILE* g_logFile = nullptr;
+
+struct IniStamp {
+    bool          initialized = false;
+    bool          exists      = false;
+    std::uint32_t mtimeLo     = 0;
+    std::uint32_t mtimeHi     = 0;
+    std::uint32_t sizeLo      = 0;
+    std::uint32_t sizeHi      = 0;
+
+    bool SameAs(const IniStamp& o) const noexcept {
+        return initialized == o.initialized && exists == o.exists &&
+               mtimeLo == o.mtimeLo && mtimeHi == o.mtimeHi &&
+               sizeLo == o.sizeLo && sizeHi == o.sizeHi;
+    }
+};
+IniStamp g_lastIniStamp{};
+
+IniStamp QueryIniStamp(const std::string& path) noexcept {
+    IniStamp s{};
+    s.initialized = true;
+    WIN32_FILE_ATTRIBUTE_DATA fad{};
+    if (::GetFileAttributesExA(path.c_str(), GetFileExInfoStandard, &fad) &&
+        (fad.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+        s.exists  = true;
+        s.mtimeLo = fad.ftLastWriteTime.dwLowDateTime;
+        s.mtimeHi = fad.ftLastWriteTime.dwHighDateTime;
+        s.sizeLo  = fad.nFileSizeLow;
+        s.sizeHi  = fad.nFileSizeHigh;
+    }
+    return s;
+}
+
+std::string ParseChatCmdValue(const std::string& rawTrimmed) {
+    std::string v = rawTrimmed;
+    if (v.size() >= 2 && v.front() == '"' && v.back() == '"') {
+        v = v.substr(1, v.size() - 2);
+    } else {
+        const std::size_t semi = v.find(';');
+        if (semi != std::string::npos) {
+            std::size_t end = semi;
+            while (end > 0 && (v[end - 1] == ' ' || v[end - 1] == '\t')) --end;
+            v = v.substr(0, end);
+        }
+    }
+    if (v.empty()) return {};
+    if (v.size() == 4 &&
+        (v[0] == 'N' || v[0] == 'n') && (v[1] == 'O' || v[1] == 'o') &&
+        (v[2] == 'N' || v[2] == 'n') && (v[3] == 'E' || v[3] == 'e')) {
+        return {};
+    }
+    return v;
+}
+
+bool TryApplyChatOrPadKey(const std::string& key,
+                          const std::string& rawValTrimmed,
+                          const std::string& strippedVal,
+                          ChatCommandConfig& chat,
+                          bool& gamepadPanel) {
+    if (key == "CHATCOMMANDS" || key == "CHAT_COMMANDS" || key == "CHATHOTKEYS") {
+        chat.enabled = std::atoi(strippedVal.c_str()) != 0;
+        return true;
+    }
+    if (key == "CHATCASESENSITIVE" || key == "CHAT_CASE_SENSITIVE") {
+        chat.caseSensitive = std::atoi(strippedVal.c_str()) != 0;
+        return true;
+    }
+    if (key == "CHATCMDVIS" || key == "CHAT_CMD_VIS" || key == "CHATVIS" || key == "CHAT_U" || key == "CHATU") {
+        chat.cmdVis = ParseChatCmdValue(rawValTrimmed);
+        return true;
+    }
+    if (key == "CHATCMDFREEZE" || key == "CHAT_CMD_FREEZE" || key == "CHATFREEZE" || key == "CHAT_I" || key == "CHATI") {
+        chat.cmdFreeze = ParseChatCmdValue(rawValTrimmed);
+        return true;
+    }
+    if (key == "CHATCMDWORLDFREEZE" || key == "CHAT_CMD_WORLD_FREEZE" || key == "CHATWORLDFREEZE" ||
+        key == "CHATCMDFREEZEOTHERS" || key == "CHAT_K" || key == "CHATK") {
+        chat.cmdWorldFreeze = ParseChatCmdValue(rawValTrimmed);
+        return true;
+    }
+    if (key == "CHATCMDSTEP" || key == "CHAT_CMD_STEP" || key == "CHATSTEP" ||
+        key == "CHATCMDSTEPFRAME" || key == "CHAT_O" || key == "CHATO") {
+        chat.cmdStep = ParseChatCmdValue(rawValTrimmed);
+        return true;
+    }
+    if (key == "CHATCMDKEEPHITBOX" || key == "CHAT_CMD_KEEP_HITBOX" || key == "CHATKEEPHITBOX" ||
+        key == "CHATKEEP" || key == "CHATCMDPERSISTHITBOX" || key == "CHAT_J" || key == "CHATJ") {
+        chat.cmdKeepHitbox = ParseChatCmdValue(rawValTrimmed);
+        return true;
+    }
+    if (key == "CHATCMDPANEL" || key == "CHAT_CMD_PANEL" || key == "CHATPANEL" ||
+        key == "CHATCMDFILTER" || key == "CHATFILTER" || key == "CHAT_P" || key == "CHATP") {
+        chat.cmdPanel = ParseChatCmdValue(rawValTrimmed);
+        return true;
+    }
+    if (key == "GAMEPADPANEL" || key == "GAMEPAD_PANEL" || key == "CONTROLLERPANEL") {
+        gamepadPanel = std::atoi(strippedVal.c_str()) != 0;
+        return true;
+    }
+    return false;
+}
+
+bool ReadIniFileContent(const std::string& iniPath, std::string& outContent) {
+    outContent.clear();
+    FILE* f = _fsopen(iniPath.c_str(), "rb", _SH_DENYNO);
+    if (!f) return false;
+    std::fseek(f, 0, SEEK_END);
+    const long sz = std::ftell(f);
+    std::fseek(f, 0, SEEK_SET);
+    if (sz > 0 && sz < 65536) {
+        outContent.resize(static_cast<std::size_t>(sz));
+        const std::size_t got = std::fread(&outContent[0], 1, static_cast<std::size_t>(sz), f);
+        outContent.resize(got);
+    }
+    std::fclose(f);
+    return true;
+}
 
 void EnsurePaths() {
     if (!g_logPath.empty()) return;
@@ -104,6 +221,16 @@ void InitLog() {
         std::fclose(g_logFile);
         g_logFile = nullptr;
     }
+    // Preserve previous non-empty session log as debug_hitbox.prev.log before truncating
+    const std::string prevPath = (g_dllDir.empty() || g_dllDir == ".")
+                                     ? std::string("debug_hitbox.prev.log")
+                                     : (g_dllDir + "\\debug_hitbox.prev.log");
+    WIN32_FILE_ATTRIBUTE_DATA fad{};
+    if (::GetFileAttributesExA(g_logPath.c_str(), GetFileExInfoStandard, &fad) &&
+        (fad.nFileSizeHigh > 0 || fad.nFileSizeLow > 0)) {
+        ::MoveFileExA(g_logPath.c_str(), prevPath.c_str(),
+                      MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED);
+    }
     g_logFile = _fsopen(g_logPath.c_str(), "w", _SH_DENYNO);
     if (g_logFile) {
         SYSTEMTIME st{};
@@ -153,20 +280,17 @@ std::string DllDirectory() {
 Config LoadConfig() {
     Config cfg;
     const std::string iniPath = DllDirectory() + "\\debug_hitbox.ini";
-    FILE* f = nullptr;
-    if (fopen_s(&f, iniPath.c_str(), "rb") != 0 || !f) {
-        Log("config: no debug_hitbox.ini found; using defaults (Vis=U, Freeze=I, World=K, Keep=J, Step=O, Filter=P)");
+    {
+        std::lock_guard<std::mutex> lk(g_hotCfgMx);
+        g_lastIniStamp = QueryIniStamp(iniPath);
+    }
+    std::string content;
+    if (!ReadIniFileContent(iniPath, content)) {
+        Log("config: no debug_hitbox.ini found; using defaults (Vis=U, Freeze=I, World=K, Keep=J, Step=O, Filter=P; chat U=\"%s\", I=\"%s\", K=\"%s\", O=\"%s\", J=\"%s\", P=\"%s\")",
+            cfg.chat.cmdVis.c_str(), cfg.chat.cmdFreeze.c_str(), cfg.chat.cmdWorldFreeze.c_str(),
+            cfg.chat.cmdStep.c_str(), cfg.chat.cmdKeepHitbox.c_str(), cfg.chat.cmdPanel.c_str());
         return cfg;
     }
-    std::fseek(f, 0, SEEK_END);
-    const long sz = std::ftell(f);
-    std::fseek(f, 0, SEEK_SET);
-    std::string content;
-    if (sz > 0 && sz < 65536) {
-        content.resize(static_cast<std::size_t>(sz));
-        std::fread(&content[0], 1, static_cast<std::size_t>(sz), f);
-    }
-    std::fclose(f);
 
     std::size_t pos = 0;
     if (content.size() >= 3 &&
@@ -185,7 +309,8 @@ Config LoadConfig() {
         const std::size_t eq = line.find('=');
         if (eq == std::string::npos) continue;
         const std::string key = Upper(Trim(line.substr(0, eq)));
-        std::string val = Trim(line.substr(eq + 1));
+        const std::string rawVal = Trim(line.substr(eq + 1));
+        std::string val = rawVal;
         if (!val.empty() && val[0] == ';') {
             val = ";";
         } else {
@@ -193,6 +318,7 @@ Config LoadConfig() {
             if (semi != std::string::npos) val = Trim(val.substr(0, semi));
         }
 
+        if (TryApplyChatOrPadKey(key, rawVal, val, cfg.chat, cfg.gamepadPanel)) continue;
         if (key == "ENABLED") cfg.enabled = std::atoi(val.c_str()) != 0;
         else if (key == "KEYTOGGLEVIS" || key == "KEY_VIS") cfg.vkToggleVis = ParseVirtualKey(val, cfg.vkToggleVis);
         else if (key == "KEYTOGGLEFREEZE" || key == "KEY_FREEZE") cfg.vkToggleFreeze = ParseVirtualKey(val, cfg.vkToggleFreeze);
@@ -248,13 +374,111 @@ Config LoadConfig() {
             if (d >= 0 && d < static_cast<int>(DepthGuideMode::Count)) {
                 cfg.startDepthMode = static_cast<DepthGuideMode>(d);
             }
+        } else if (key == "SBCMESHMODE" || key == "SBCMESHTIER" || key == "SBC_MESH_TIER" || key == "SBCTIER") {
+            int tm = std::atoi(val.c_str());
+            if (tm >= 0 && tm < static_cast<int>(SbcMeshTier::Count)) {
+                cfg.startSbcTier = static_cast<SbcMeshTier>(tm);
+            }
+        } else if (key == "SPECIALSBCSTYLE" || key == "SPECIAL_SBC_STYLE" || key == "SPECIALSBC") {
+            int sp = std::atoi(val.c_str());
+            if (sp >= 0 && sp < static_cast<int>(SpecialSbcStyle::Count)) {
+                cfg.startSpecialSbc = static_cast<SpecialSbcStyle>(sp);
+            }
+        } else if (key == "EMPARTMODE" || key == "EM_PART_MODE" || key == "MONSTERPARTMODE") {
+            int pm = std::atoi(val.c_str());
+            if (pm >= 0 && pm < static_cast<int>(EmPartMode::Count)) {
+                cfg.startEmPartMode = static_cast<EmPartMode>(pm);
+            }
+        } else if (key == "EMUNSELECTEDSTYLE" || key == "EM_UNSELECTED_STYLE") {
+            int us = std::atoi(val.c_str());
+            if (us >= 0 && us < static_cast<int>(EmUnselectedStyle::Count)) {
+                cfg.startEmUnsStyle = static_cast<EmUnselectedStyle>(us);
+            }
+        } else if (key == "EMPARTLABELS" || key == "EM_PART_LABELS") {
+            int lb = std::atoi(val.c_str());
+            if (lb >= 0 && lb < static_cast<int>(EmPartLabelMode::Count)) {
+                cfg.startEmLabelMode = static_cast<EmPartLabelMode>(lb);
+            }
+        } else if (key == "ENTITYLINESCALE" || key == "ENTITY_LINE_SCALE" || key == "MONSTERLINESCALE") {
+            float sc = static_cast<float>(std::atof(val.c_str()));
+            if (sc >= 0.25f && sc <= 4.0f) {
+                cfg.defaultEntityLineIdx = NearestLineScaleIdx(sc);
+            }
+        } else if (key == "SBCLINESCALE" || key == "SBC_LINE_SCALE" || key == "TERRAINLINESCALE" || key == "RAWLINESCALE") {
+            float sc = static_cast<float>(std::atof(val.c_str()));
+            if (sc >= 0.25f && sc <= 4.0f) {
+                cfg.defaultSbcLineIdx = NearestLineScaleIdx(sc);
+            }
         }
     }
 
-    Log("config: loaded debug_hitbox.ini (enabled=%d, vkVis=0x%02X, vkFreeze=0x%02X, vkWorld=0x%02X, vkKeep=0x%02X, vkStep=0x%02X, vkPanel=0x%02X, mask=0x%02X)",
+    Log("config: loaded debug_hitbox.ini (enabled=%d, vkVis=0x%02X, vkFreeze=0x%02X, vkWorld=0x%02X, vkKeep=0x%02X, vkStep=0x%02X, vkPanel=0x%02X, mask=0x%02X; chat en=%d cs=%d U=\"%s\" I=\"%s\" K=\"%s\" O=\"%s\" J=\"%s\" P=\"%s\" pad=%d)",
         cfg.enabled ? 1 : 0, cfg.vkToggleVis, cfg.vkToggleFreeze, cfg.vkFreezeOthers,
-        cfg.vkPersistHitbox, cfg.vkStepFrame, cfg.vkCycleFilter, cfg.defaultVisMask);
+        cfg.vkPersistHitbox, cfg.vkStepFrame, cfg.vkCycleFilter, cfg.defaultVisMask,
+        cfg.chat.enabled ? 1 : 0, cfg.chat.caseSensitive ? 1 : 0,
+        cfg.chat.cmdVis.c_str(), cfg.chat.cmdFreeze.c_str(), cfg.chat.cmdWorldFreeze.c_str(),
+        cfg.chat.cmdStep.c_str(), cfg.chat.cmdKeepHitbox.c_str(), cfg.chat.cmdPanel.c_str(),
+        cfg.gamepadPanel ? 1 : 0);
     return cfg;
+}
+
+bool HotReloadRuntimeConfig(ChatCommandConfig& ioChat, bool& ioGamepadPanel) {
+    const std::string iniPath = DllDirectory() + "\\debug_hitbox.ini";
+    const IniStamp curStamp = QueryIniStamp(iniPath);
+
+    std::lock_guard<std::mutex> lk(g_hotCfgMx);
+    if (g_lastIniStamp.initialized && curStamp.SameAs(g_lastIniStamp)) {
+        return false;
+    }
+
+    ChatCommandConfig nextChat{};
+    bool nextGamepad = true;
+
+    std::string content;
+    if (curStamp.exists) {
+        if (!ReadIniFileContent(iniPath, content)) {
+            // Editor may still be flushing file; keep old stamp and retry on next event
+            return false;
+        }
+        std::size_t pos = 0;
+        if (content.size() >= 3 &&
+            static_cast<unsigned char>(content[0]) == 0xEF &&
+            static_cast<unsigned char>(content[1]) == 0xBB &&
+            static_cast<unsigned char>(content[2]) == 0xBF) {
+            pos = 3;
+        }
+        while (pos < content.size()) {
+            std::size_t nl = content.find('\n', pos);
+            if (nl == std::string::npos) nl = content.size();
+            std::string line = Trim(content.substr(pos, nl - pos));
+            pos = nl + 1;
+            if (line.empty() || line[0] == ';' || line[0] == '#' || line[0] == '[') continue;
+            const std::size_t eq = line.find('=');
+            if (eq == std::string::npos) continue;
+            const std::string key = Upper(Trim(line.substr(0, eq)));
+            const std::string rawVal = Trim(line.substr(eq + 1));
+            std::string val = rawVal;
+            if (!val.empty() && val[0] == ';') {
+                val = ";";
+            } else {
+                const std::size_t semi = val.find(';');
+                if (semi != std::string::npos) val = Trim(val.substr(0, semi));
+            }
+            TryApplyChatOrPadKey(key, rawVal, val, nextChat, nextGamepad);
+        }
+    }
+
+    g_lastIniStamp = curStamp;
+    ioChat         = nextChat;
+    ioGamepadPanel = nextGamepad;
+
+    Log("config: hot-reloaded debug_hitbox.ini (%s; chat en=%d cs=%d U=\"%s\" I=\"%s\" K=\"%s\" O=\"%s\" J=\"%s\" P=\"%s\" pad=%d)",
+        curStamp.exists ? "updated" : "removed -> defaults",
+        nextChat.enabled ? 1 : 0, nextChat.caseSensitive ? 1 : 0,
+        nextChat.cmdVis.c_str(), nextChat.cmdFreeze.c_str(), nextChat.cmdWorldFreeze.c_str(),
+        nextChat.cmdStep.c_str(), nextChat.cmdKeepHitbox.c_str(), nextChat.cmdPanel.c_str(),
+        nextGamepad ? 1 : 0);
+    return true;
 }
 
 std::uint32_t PresetMask(PresetId p) noexcept {
@@ -321,6 +545,54 @@ const char* DepthGuideModeName(DepthGuideMode m) noexcept {
         case DepthGuideMode::NoRings:       return "SEMI 3D ONLY";
         case DepthGuideMode::RawWire:       return "RAW WIREFRAME";
         default:                            return "SEMI 3D+RINGS";
+    }
+}
+
+const char* SbcMeshTierName(SbcMeshTier t) noexcept {
+    switch (t) {
+        case SbcMeshTier::LowOnly:  return "LOW ONLY";
+        case SbcMeshTier::Both:     return "LOW + HIGH";
+        case SbcMeshTier::HighOnly: return "HIGH ONLY";
+        default:                    return "LOW + HIGH";
+    }
+}
+
+const char* SpecialSbcStyleName(SpecialSbcStyle s) noexcept {
+    switch (s) {
+        case SpecialSbcStyle::Off:    return "OFF";
+        case SpecialSbcStyle::Ghost:  return "GHOST (96% T)";
+        case SpecialSbcStyle::Light:  return "LIGHT (93% T)";
+        case SpecialSbcStyle::Medium: return "MED (85% T)";
+        case SpecialSbcStyle::Vivid:  return "VIVID (72% T)";
+        case SpecialSbcStyle::Opaque: return "OPAQUE (0% T)";
+        default:                      return "LIGHT (93% T)";
+    }
+}
+
+const char* EmPartModeName(EmPartMode m) noexcept {
+    switch (m) {
+        case EmPartMode::Off:        return "OFF";
+        case EmPartMode::Hitzone:    return "HITZONE (FINE)";
+        case EmPartMode::ClutchZone: return "CLUTCH (SOFTEN)";
+        default:                     return "OFF";
+    }
+}
+
+const char* EmUnselectedStyleName(EmUnselectedStyle s) noexcept {
+    switch (s) {
+        case EmUnselectedStyle::Hide:  return "HIDE";
+        case EmUnselectedStyle::Ghost: return "GHOST OUTLINE";
+        default:                       return "HIDE";
+    }
+}
+
+const char* EmPartLabelModeName(EmPartLabelMode l) noexcept {
+    switch (l) {
+        case EmPartLabelMode::Full:     return "PHYS + ELEM + EXT";
+        case EmPartLabelMode::PhysOnly: return "PHYS + EXTRACT";
+        case EmPartLabelMode::IdOnly:   return "ID + EXTRACT";
+        case EmPartLabelMode::Off:      return "OFF";
+        default:                        return "PHYS + ELEM + EXT";
     }
 }
 

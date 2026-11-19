@@ -9,7 +9,7 @@ namespace hook {
 namespace {
 
 constexpr std::size_t kCodeArenaSize = 0x1000; // Single 4 KB PAGE_EXECUTE_READ page
-constexpr std::size_t kMaxPermHooks  = 4;
+constexpr std::size_t kMaxPermHooks  = 6;
 
 struct PermanentHookInfo {
     bool           valid = false;
@@ -20,10 +20,11 @@ struct PermanentHookInfo {
 };
 
 struct DynHook5Info {
-    bool           prepared = false;
-    bool           enabled  = false;
-    bool           wasChained = false;
-    std::uintptr_t site     = 0;
+    bool           prepared          = false;
+    bool           enabled           = false;
+    bool           wasChained        = false;
+    bool           externallyChained = false;
+    std::uintptr_t site              = 0;
     std::uint8_t   orig5[5]{};
     std::uint8_t   jmp5[5]{};
 };
@@ -243,10 +244,11 @@ bool PrepareDynamicHook5(DynHookId id,
     }
 
     DynHook5Info& d = g_dynHooks[idx];
-    d.prepared   = true;
-    d.enabled    = false;
-    d.wasChained = chained;
-    d.site       = site;
+    d.prepared          = true;
+    d.enabled           = false;
+    d.wasChained        = chained;
+    d.externallyChained = false;
+    d.site              = site;
     std::memcpy(d.orig5, cur, 5);
 
     d.jmp5[0] = 0xE9;
@@ -332,11 +334,25 @@ void SetDynamicHook5Enabled(DynHookId id, bool enabled) noexcept {
     std::lock_guard<std::mutex> lk(g_mx);
     if (d.enabled == enabled) return;
 
-    // Safety check if another plugin chained over our site after us: don't clobber foreign jmp on disable
+    // If another plugin chained over our active jmp, our relay stays in their chain permanently —
+    // never overwrite their jmp on disable or subsequent re-enable!
+    if (d.externallyChained) {
+        d.enabled = enabled;
+        return;
+    }
+
+    const auto* cur = reinterpret_cast<const std::uint8_t*>(d.site);
     if (!enabled) {
-        const auto* cur = reinterpret_cast<const std::uint8_t*>(d.site);
         if (std::memcmp(cur, d.jmp5, 5) != 0) {
+            d.externallyChained = true;
             d.enabled = false;
+            return;
+        }
+    } else {
+        if (std::memcmp(cur, d.orig5, 5) != 0) {
+            if (std::memcmp(cur, d.jmp5, 5) == 0) {
+                d.enabled = true;
+            }
             return;
         }
     }
@@ -370,8 +386,11 @@ void RemoveAllHooks() {
         g_lazyGuard.installed = false;
     }
     for (std::size_t i = 0; i < kDynCount; ++i) {
-        if (g_dynHooks[i].enabled && g_dynHooks[i].site) {
-            AtomicSwap5BytesAligned(g_dynHooks[i].site, g_dynHooks[i].orig5);
+        if (g_dynHooks[i].enabled && !g_dynHooks[i].externallyChained && g_dynHooks[i].site) {
+            const auto* cur = reinterpret_cast<const std::uint8_t*>(g_dynHooks[i].site);
+            if (std::memcmp(cur, g_dynHooks[i].jmp5, 5) == 0) {
+                AtomicSwap5BytesAligned(g_dynHooks[i].site, g_dynHooks[i].orig5);
+            }
             g_dynHooks[i].enabled = false;
         }
     }

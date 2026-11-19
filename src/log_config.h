@@ -59,7 +59,48 @@ enum class DepthGuideMode : std::uint8_t {
     Count         = 6
 };
 
-inline constexpr int kSbcRadiusCount = 4;
+enum class SbcMeshTier : std::uint8_t {
+    LowOnly  = 0, // Low-poly physics collision only (*_col.sbc — fastest, true gameplay terrain)
+    Both     = 1, // Both Low-poly physics (*_col.sbc) + High-poly detail/effect (*_col_eff.sbc)
+    HighOnly = 2, // High-poly detail/effect/occlude collision only (*_col_eff.sbc / mOccludeSbc)
+    Count    = 3
+};
+
+enum class SpecialSbcStyle : std::uint8_t {
+    Off    = 0, // Hidden (physical solid terrain only)
+    Ghost  = 1, // Ultra-transparent whisper ghost (~96% transparent)
+    Light  = 2, // Default: light transparent (~93% transparent — subtly see-through)
+    Medium = 3, // Medium translucent (~85% transparent)
+    Vivid  = 4, // Clear tinted glass (~72% transparent)
+    Opaque = 5, // 100% opaque solid (0% transparent; distinct colors from normal terrain)
+    Count  = 6
+};
+
+enum class EmPartMode : std::uint8_t {
+    Off        = 0, // Unified monster hurtbox / pushbox coloring & visibility
+    Hitzone    = 1, // Fine hitzone partition (mBaseDmgGroup / sub-meat + live physical & elemental HZV)
+    ClutchZone = 2, // Iceborne Clutch Claw soften zone partition (rScarParts / cScarPartsData +0x174)
+    Count      = 3
+};
+
+enum class EmUnselectedStyle : std::uint8_t {
+    Hide  = 0, // Completely hide unselected monster parts (hurtboxes + bound pushboxes)
+    Ghost = 1, // Draw unselected monster parts as faint ghost outlines for posture context
+    Count = 2
+};
+
+enum class EmPartLabelMode : std::uint8_t {
+    Full     = 0, // 2-line 3D callout: Part ID + [Extract] + Phys (S/B/A) + Elem (F/W/T/I/D)
+    PhysOnly = 1, // 1-line 3D callout: Part ID + [Extract] + Phys (S/B/A)
+    IdOnly   = 2, // Compact 1-line 3D badge: Part ID + [Extract]
+    Off      = 3, // Color-coded 3D wireframes only (no floating text badges)
+    Count    = 4
+};
+
+inline constexpr int kMaxEmParts          = 32;
+inline constexpr int kSbcRadiusCount      = 4;
+inline constexpr int kLineScaleCount      = 8;
+inline constexpr int kDefaultLineScaleIdx = 3; // 1.00x
 
 inline float SbcRadiusMetersFromIdx(int idx) noexcept {
     static constexpr float kRadii[kSbcRadiusCount] = {15.0f, 25.0f, 45.0f, 80.0f};
@@ -68,16 +109,63 @@ inline float SbcRadiusMetersFromIdx(int idx) noexcept {
     return kRadii[idx];
 }
 
+inline float LineScaleFromIdx(int idx) noexcept {
+    static constexpr float kScales[kLineScaleCount] = {
+        0.35f, 0.55f, 0.75f, 1.00f, 1.35f, 1.75f, 2.25f, 3.00f
+    };
+    if (idx < 0) return kScales[0];
+    if (idx >= kLineScaleCount) return kScales[kLineScaleCount - 1];
+    return kScales[idx];
+}
+
+inline int NearestLineScaleIdx(float scale) noexcept {
+    static constexpr float kScales[kLineScaleCount] = {
+        0.35f, 0.55f, 0.75f, 1.00f, 1.35f, 1.75f, 2.25f, 3.00f
+    };
+    int bestIdx = kDefaultLineScaleIdx;
+    float bestDiff = 1e9f;
+    for (int i = 0; i < kLineScaleCount; ++i) {
+        const float d = (scale > kScales[i]) ? (scale - kScales[i]) : (kScales[i] - scale);
+        if (d < bestDiff) {
+            bestDiff = d;
+            bestIdx = i;
+        }
+    }
+    return bestIdx;
+}
+
 struct ViewFilterState {
-    std::uint32_t  visMask      = kCatMaskCombat;
-    int            presetCursor = static_cast<int>(PresetId::Combat);
-    int            sbcRadiusIdx = 1; // 0=15m, 1=25m (default), 2=45m, 3=80m
-    BackdropMode   backdrop     = BackdropMode::Off;
-    StageHideMode  stageHide    = StageHideMode::Off;
-    DepthGuideMode depthMode    = DepthGuideMode::Auto;
-    bool           hideMonster  = false;
-    bool           panelOpen    = false;
-    int            panelCursor  = 0; // 0..12
+    std::uint32_t     visMask         = kCatMaskCombat;
+    int               presetCursor    = static_cast<int>(PresetId::Combat);
+    int               sbcRadiusIdx    = 1; // 0=15m, 1=25m (default), 2=45m, 3=80m
+    int               entityLineIdx   = kDefaultLineScaleIdx; // Entity / monster / player line width scale
+    int               sbcLineIdx      = kDefaultLineScaleIdx; // Terrain .SBC / RAW WIRE line width scale
+    BackdropMode      backdrop        = BackdropMode::Off;
+    StageHideMode     stageHide       = StageHideMode::Off;
+    DepthGuideMode    depthMode       = DepthGuideMode::Auto;
+    SbcMeshTier       sbcTier         = SbcMeshTier::Both;
+    SpecialSbcStyle   specialSbc      = SpecialSbcStyle::Light;
+    EmPartMode        emPartMode      = EmPartMode::Off;
+    EmUnselectedStyle emUnsStyle      = EmUnselectedStyle::Hide;
+    EmPartLabelMode   emLabelMode     = EmPartLabelMode::Full;
+    int               emTargetScope   = 0; // 0=Auto(Solo), 1=Auto(+Others), 2..9=Lock #1..#8(Solo)
+    std::uint32_t     emPartMask      = 0xFFFFFFFFu;
+    bool              hideMonster     = false;
+    bool              panelOpen       = false;
+    int               panelPage       = 0; // 0=Main Filter & Scene, 1=Monster Parts Inspector
+    int               panelCursor     = 0; // 0..17 (Page 0)
+    int               partPanelCursor = 0; // 0..4+partCount (Page 1)
+};
+
+struct ChatCommandConfig {
+    bool        enabled        = true;
+    bool        caseSensitive  = false;
+    std::string cmdVis         = "$draw_hitbox";   // U: Toggle hitbox/scene visualization
+    std::string cmdFreeze      = "$full_freeze";   // I: Full Freeze / Resume
+    std::string cmdWorldFreeze = "$ThE_WoRLD!!!";  // K: World Freeze / Resume
+    std::string cmdStep        = "$step_frame";    // O: Step +1 frame
+    std::string cmdKeepHitbox  = "$keep_hitbox";   // J: Keep single-trigger hitboxes active
+    std::string cmdPanel       = "$show_panel";    // P: Open / close Filter & Scene Panel
 };
 
 struct Config {
@@ -92,18 +180,27 @@ struct Config {
     bool startVisOn         = false; // Whether hitbox display starts ON automatically
     bool keepHitboxesActive = true;  // Keep single-trigger frozen hitboxes active & repeatable in World Freeze
     bool blockCameraKeys    = true;  // Block O/K/L/; camera rotation keys while mod is loaded (except in chat)
+    bool gamepadPanel       = true;  // Controller D-Pad + A navigation when [P] panel is open
+    ChatCommandConfig chat{};        // In-game chat exact-match triggers (configurable & hot-reloadable via .ini)
     bool showHudBanner      = true;  // Show compact top-left status indicator
     float lineThickness     = 2.0f;  // Base wireframe thickness in pixels (at 1080p)
     float opacityScale      = 1.0f;  // Global opacity multiplier (0.1 .. 1.5)
     float sbcSurfaceOpacity = 1.0f;  // .sbc semi-transparent face opacity multiplier (0.1 .. 3.0)
     float hdrNits           = 0.0f;  // HDR overlay luminance in nits (0 = auto from game HDR paper white)
 
-    std::uint32_t  defaultVisMask      = kCatMaskCombat;
-    int            defaultSbcRadiusIdx = 1;
-    bool           startHideMonster    = false;
-    StageHideMode  startStageHide      = StageHideMode::Off;
-    BackdropMode   startBackdrop       = BackdropMode::Off;
-    DepthGuideMode startDepthMode      = DepthGuideMode::Auto;
+    std::uint32_t     defaultVisMask       = kCatMaskCombat;
+    int               defaultSbcRadiusIdx  = 1;
+    int               defaultEntityLineIdx = kDefaultLineScaleIdx;
+    int               defaultSbcLineIdx    = kDefaultLineScaleIdx;
+    bool              startHideMonster     = false;
+    StageHideMode     startStageHide       = StageHideMode::Off;
+    BackdropMode      startBackdrop        = BackdropMode::Off;
+    DepthGuideMode    startDepthMode       = DepthGuideMode::Auto;
+    SbcMeshTier       startSbcTier         = SbcMeshTier::Both;
+    SpecialSbcStyle   startSpecialSbc      = SpecialSbcStyle::Light;
+    EmPartMode        startEmPartMode      = EmPartMode::Off;
+    EmUnselectedStyle startEmUnsStyle      = EmUnselectedStyle::Hide;
+    EmPartLabelMode   startEmLabelMode     = EmPartLabelMode::Full;
 };
 
 void InitLog();
@@ -111,6 +208,9 @@ void CloseLog();
 void Log(const char* fmt, ...);
 std::string DllDirectory();
 Config LoadConfig();
+// Checks debug_hitbox.ini mtime/size (zero polling; called only on chat send / panel open)
+// and hot-reloads ChatCommands, ChatCaseSensitive, ChatCmd*, and GamepadPanel when changed.
+bool HotReloadRuntimeConfig(ChatCommandConfig& ioChat, bool& ioGamepadPanel);
 
 std::uint32_t PresetMask(PresetId p) noexcept;
 const char* PresetName(PresetId p) noexcept;
@@ -118,6 +218,11 @@ const char* MatchPresetName(std::uint32_t visMask) noexcept;
 const char* StageHideModeName(StageHideMode m) noexcept;
 const char* BackdropModeName(BackdropMode m) noexcept;
 const char* DepthGuideModeName(DepthGuideMode m) noexcept;
+const char* SbcMeshTierName(SbcMeshTier t) noexcept;
+const char* SpecialSbcStyleName(SpecialSbcStyle s) noexcept;
+const char* EmPartModeName(EmPartMode m) noexcept;
+const char* EmUnselectedStyleName(EmUnselectedStyle s) noexcept;
+const char* EmPartLabelModeName(EmPartLabelMode l) noexcept;
 
 bool Readable(std::uintptr_t addr, std::size_t len);
 

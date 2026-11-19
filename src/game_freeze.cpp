@@ -84,12 +84,9 @@ enum class DtiPolicy : std::uint8_t {
     CheckEffectOwner  = 4
 };
 
-struct AtomicDtiSlot {
-    std::atomic<std::uintptr_t> dti{0};
-    std::atomic<std::uint8_t> policy{0};
-};
 constexpr std::uint32_t kDtiPolicySlots = 1024;
-AtomicDtiSlot g_dtiPolicyCache[kDtiPolicySlots]{};
+// Packed atomic slot: bits [0..55] = canonical MtDTI ptr, bits [56..63] = DtiPolicy (0 = empty)
+std::atomic<std::uint64_t> g_dtiPolicyCache[kDtiPolicySlots]{};
 
 // Inverted VFX freeze set: stores ONLY pre-existing world/monster uMhEfc units (and stepped monster effects).
 // Any uMhEfc spawned while monsters are frozen (Player attacks, Empowered TCS flash/blur, hitsparks, mantles)
@@ -290,19 +287,22 @@ DtiPolicy ComputeDtiPolicy(std::uintptr_t dti) {
 
 DtiPolicy LookupDtiPolicy(std::uintptr_t dti) {
     if (!dti) return DtiPolicy::Allow;
+    const std::uint64_t dtiKey = static_cast<std::uint64_t>(dti);
+    if ((dtiKey >> 56) != 0) return ComputeDtiPolicy(dti);
+
     std::uint32_t idx = static_cast<std::uint32_t>((dti >> 4) * 2654435761ULL) & (kDtiPolicySlots - 1);
     for (std::uint32_t n = 0; n < 16; ++n) {
-        const std::uintptr_t curDti = g_dtiPolicyCache[idx].dti.load(std::memory_order_acquire);
-        if (curDti == dti) {
-            const auto pol = static_cast<DtiPolicy>(g_dtiPolicyCache[idx].policy.load(std::memory_order_relaxed));
+        const std::uint64_t cur = g_dtiPolicyCache[idx].load(std::memory_order_acquire);
+        if ((cur & 0x00FFFFFFFFFFFFFFULL) == dtiKey) {
+            const auto pol = static_cast<DtiPolicy>(cur >> 56);
             if (pol != DtiPolicy::Unknown) return pol;
         }
-        if (curDti == 0) {
+        if (cur == 0) {
             const DtiPolicy computed = ComputeDtiPolicy(dti);
-            g_dtiPolicyCache[idx].policy.store(static_cast<std::uint8_t>(computed), std::memory_order_relaxed);
-            std::uintptr_t expected = 0;
-            g_dtiPolicyCache[idx].dti.compare_exchange_strong(
-                expected, dti, std::memory_order_release, std::memory_order_relaxed);
+            const std::uint64_t packed = (static_cast<std::uint64_t>(computed) << 56) | dtiKey;
+            std::uint64_t expected = 0;
+            g_dtiPolicyCache[idx].compare_exchange_strong(
+                expected, packed, std::memory_order_release, std::memory_order_relaxed);
             return computed;
         }
         idx = (idx + 1) & (kDtiPolicySlots - 1);

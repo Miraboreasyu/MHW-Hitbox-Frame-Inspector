@@ -28,6 +28,13 @@ struct FrameStats {
     bool hasCamera                    = false;
 };
 
+struct EmInspectorCounts {
+    std::uint32_t partCount    = 0;
+    std::uint32_t monsterCount = 0;
+};
+
+EmInspectorCounts GetLastEmInspectorCounts() noexcept;
+
 // Builds optional fullscreen collision backdrop + 3D wireframe quads + 2D HUD & [P] Filter Panel.
 void BuildOverlayFrame(std::uintptr_t exeBase,
                        float screenW,
