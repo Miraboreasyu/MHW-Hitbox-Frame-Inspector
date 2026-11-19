@@ -177,13 +177,13 @@
 
 ## English Guide
 
-A real-time collision/hitbox visualizer, monster part hitzone & Clutch Claw zone inspector, stage terrain collision viewer, and zero-delay frame freeze/stepping tool for **Monster Hunter: World Iceborne (Steam 15.23)**, supporting both DirectX 11 / DirectX 12 and SDR / HDR displays.
+A real-time hitbox/hurtbox visualization, monster part hitzone & Clutch Claw soften-zone inspector, stage terrain collision viewer, and zero-delay freeze/frame-stepping tool for **Monster Hunter: World Iceborne (Steam 15.23)**, compatible with both DirectX 11 / DirectX 12 and SDR / HDR displays.
 
 ### Requirements & Installation
 
-1. **Game Version**: Monster Hunter: World Iceborne **15.23** (Steam).
-2. **Prerequisite**: **Stracker's Loader**.
-3. Extract the `nativePC` folder from the archive into your game root directory:
+1. Game version: **Monster Hunter: World Iceborne 15.23** (Steam).
+2. Prerequisite plugin: **Stracker's Loader**.
+3. Extract the `nativePC` folder from the archive into your game root directory and verify the final paths:
    ```text
    <MHW Root>\nativePC\plugins\debug_hitbox.dll
    <MHW Root>\nativePC\plugins\debug_hitbox.ini
@@ -191,113 +191,155 @@ A real-time collision/hitbox visualizer, monster part hitzone & Clutch Claw zone
 
 ---
 
-### Features
+### Feature Overview
 
-#### 1. Real-Time Hitbox, Hurtbox, Pushbox & Terrain Visualization
-Toggle 8 independent categories individually or switch with presets:
-- **Player Hurtbox + Defensive Frame State**: Color-coded live status with remaining frames/seconds for Invincibility (evade/action i-frames), Guard Point, Guard, Hyper Armor (including Rocksteady Mantle), Counter / Foresight windows, and Super Armor.
-- **Player Hitboxes**: Melee weapons, ammo/shells, Kinsect, and Clutch Claw attacks (gold).
-- **Palico / Companions**: Dedicated hurtboxes (sky blue) and hitboxes (amber).
-- **Monster Hurtboxes**: Full-body hurtboxes (emerald green by default; color-coded and filterable per part in the Monster Parts Inspector).
-- **Monster Hitboxes**: Melee attacks, breaths, beams, projectiles, and stage hazards (bright red).
-- **Body Pushboxes**: Physical player and monster anti-clipping collision volumes (magenta).
-- **Map Interactive Entities**: Training pole/cart, barrel bombs, falling boulders, traps, and endemic life (mint hurtboxes / coral hitboxes).
-- **Map Terrain Collision Mesh**: Static and dynamic terrain collision meshes within `15m / 25m / 45m / 80m`, with 6 visual styles (semi-transparent 3D, opaque 3D solid, ground distance rings, raw wireframe), Low/High collision tier filtering, 6-step opacity for special non-solid layers (water, zone boundaries, camera blockers), and independent entity & terrain line width scaling.
+#### 1. Real-Time Hitbox, Hurtbox & Pushbox Visualization
+Supports 8 independent categories that can be toggled individually or switched in one step via presets:
+- **Player Hurtbox + Defensive Frame State**: Color-codes the player in real time based on the current action and displays remaining frames/seconds, distinguishing Invincibility frames (rolls/hops/action i-frames), Guard Point, normal Guard, Hyper Armor (including Rocksteady Mantle), Counter / Foresight windows, and Super Armor.
+- **Player Hitboxes**: Melee weapons, ammo/shells, Kinsect, and Clutch Claw attack volumes (bright gold).
+- **Palico / Companions**: Separate hurtboxes (sky blue) and hitboxes (amber orange).
+- **Monster Hurtboxes**: Full-body hurtboxes across all monster parts (emerald green by default; can be color-coded and filtered per part in the Monster Parts Inspector).
+- **Monster Hitboxes**: Melee swings, breaths, beams, projectiles, and stage hazards (bright red).
+- **Body Pushboxes**: Physical anti-clipping collision volumes for players and monsters (magenta).
+- **Map Interactive Entities**: Training pole/cart, barrel bombs, falling boulders, vine traps, paratoads/endemic life, etc. (mint hurtboxes / coral orange hitboxes).
+- **Map Terrain Collision Mesh**: Static and dynamic terrain collision geometry within `15m / 25m / 45m / 80m` of the player, with 6 visual styles (3D translucent, solid opaque, raw wireframe), separate Low/High collision tier viewing, 6 opacity steps for special non-solid layers (water, zone boundaries, camera blockers, etc.), and independent line width scaling for entities and terrain.
 
-#### 2. Monster Parts Inspector (Live Hitzones, Tenderize & Kinsect Extract)
-Designed for deep monster study, filtering both hurtboxes and matching body pushboxes together:
-- **Fine Hitzone Partition (`HITZONE`)**: Color-codes each anatomical part with live data:
-  - Color-coded Kinsect Extract `[R/W/O/G]`
-  - Live Physical Hitzones `S/B/A` (Sever / Blunt / Shot, updating live on state changes, part breaks, and Clutch Claw tenderizing with `*` and warm-gold highlight)
-  - Color-coded Elemental Hitzones `F/W/T/I/D` (Fire / Water / Thunder / Ice / Dragon)
-  - Per-part hurtbox + pushbox counts `(nH+mP)` and an independent center helper sphere slot (`AUX CTR`)
-- **Clutch Claw Soften Zone Partition (`CLUTCH`)**: Groups hurtboxes by distinct tenderizable Clutch Claw zones with separate colors; unclutchable parts are grouped into a dedicated `NO-CLAW` slot.
-- **Flexible Filtering**: Multi-toggle any combination of parts, one-key `SOLO` isolation and sequential part stepping, `HIDE` vs `GHOST OUTLINE` for unselected parts, multi-monster target locking, and 4 modes of 3D floating part labels.
+#### 2. Monster Parts Inspector (Live Hitzones / Tenderize / Kinsect Extract)
+Built for in-depth study of specific monsters, filtering hurtboxes and their matching physical body pushboxes together:
+- **Fine Hitzone Partition (`HITZONE`)**: Color-codes each anatomical part of the monster independently and displays in real time:
+  - Color-coded Kinsect Extract `[R/W/O/G]` (Red / White / Orange / Green)
+  - Live Physical Hitzones `S/B/A` (Sever / Blunt / Shot, updating live on state changes, part breaks, and Clutch Claw tenderizing, marked with `*` and warm-gold highlight while tenderized)
+  - Color-coded Live Elemental Hitzones `F/W/T/I/D` (Fire / Water / Thunder / Ice / Dragon)
+  - Hurtbox and pushbox count per part `(nH+mP)`, while keeping an independent slot for the center helper sphere (`AUX CTR`)
+- **Clutch Claw Soften Zone Partition (`CLUTCH`)**: Partitions and independently color-codes the monster by tenderizable Clutch Claw zones; parts that cannot be clutched/tenderized are consolidated into a dedicated `NO-CLAW` slot so they can be hidden or inspected separately.
+- **Fine-Grained Filtering & Inspection**: Supports multi-selecting any combination of parts, one-key solo isolation (`SOLO`) and sequential part-by-part stepping, choosing between completely hiding unselected parts (`HIDE`) or showing faint posture outlines (`GHOST OUTLINE`), multi-monster target locking, and 4 modes of 3D floating part labels.
 
-#### 3. Scene / Model Hiding & Pure Collision Canvas
-All modes keep the in-game HUD/UI clearly visible and interactions working:
-- **Hide Monster Mesh**: Hide monster models and shadows to focus purely on collision volumes.
-- **Hide Map / Stage Mesh**: `KEEP INTERACT` (hide static terrain/foliage while keeping gathering points, wedge beetles, camp boxes, and gimmicks visible) or `HIDE ALL MAP` (hide all stage visuals while keeping interactions active).
-- **Pure 3D / Canvas Backdrop**: `HIDE PL/VFX` (hide player, weapon, Palico, and 3D VFX), `HIDE ALL 3D` (pure dark collision canvas with full HUD intact), or `DIM 45%` (softly dim 3D world while keeping UI at full brightness).
+#### 3. Scene Model Hiding & Pure Collision View
+All modes preserve the in-game player UI and normal map interactions:
+- **Hide Monster Mesh**: Hides monster models and shadows so you can focus purely on collision volumes.
+- **Hide Map / Stage Mesh**: Supports `KEEP INTERACT` (hides static terrain/foliage while keeping gathering points, wedge beetles, camp boxes, and gimmicks visible) and `HIDE ALL MAP` (hides all map visuals while keeping interactions functional).
+- **Pure 3D / Canvas Mode**: Supports hiding player and VFX (`HIDE PL/VFX`), hiding all 3D models for a pure black collision canvas (`HIDE ALL 3D`), and `DIM 45%` which gently dims only the 3D background while keeping the UI at full brightness.
 
-#### 4. Zero-Delay Freeze, World Freeze & Frame Stepping
-- **Full Freeze**: Instant pause of the entire game while still allowing panel adjustments and camera/overlay inspection.
-- **World Freeze**: Freezes monsters, projectiles/breath effects, companions, and gimmicks while the player remains completely free to move and practice timing, spacing, i-frames, and counters.
-- **Keep Hitboxes Active**: Keeps single-trigger hitboxes (fireballs, beams, grabs, single-hit swings) active and repeatable during World Freeze for repeated dodge/GP/Foresight practice.
-- **Single-Frame Step (+1 Frame)**: Advances exactly 1 frame in either Full Freeze or World Freeze.
+#### 4. Zero-Delay Freeze, World Freeze & Single-Frame Stepping
+- **Full Freeze**: Instantly freezes the entire game with zero delay; you can still adjust panel filters and inspect details while frozen.
+- **World Freeze**: Pauses only monsters, projectiles/breath effects, companions, and gimmicks while the player and weapon move freely—ideal for testing attack hitboxes, spacing, roll i-frames, Guard Points, and Foresight/counters.
+- **Keep Hitboxes Active**: Keeps single-trigger hitboxes (fireballs, breaths, single-hit swings/grabs) from disappearing after hitting or being guarded during World Freeze, allowing repeated dodge, counter, and GP practice.
+- **Single-Frame Step (+1 Frame)**: Advances exactly 1 frame while in Full Freeze or World Freeze.
 
 #### 5. In-Game Chat / Radial Shoutout Triggers & Controller Panel Control
-- **Chat & Radial Menu Shoutouts**: Trigger the 6 core actions via exact string match in in-game chat or Radial Menu custom shoutouts—ideal for controller users. Responds only to local player messages, supports consecutive repeated triggers, and hot-reloads changes from `debug_hitbox.ini` without restarting the game.
-- **Controller Panel Navigation**: Operate the `[P]` panel directly using controller D-Pad + `A` (PS `×`). Panel controls are isolated from gameplay while open, and automatically pass through whenever holding `LB` (for Radial Menu) or typing in chat.
+- **Chat / Radial Shoutout Activation**: Trigger the 6 core functions via in-game chat or Radial Menu custom shoutouts, bypassing tight controller button budgets; responds only to local player messages, supports sending the same shoutout consecutively to trigger repeatedly, and supports hot-reloading edits to `debug_hitbox.ini` while the game is running without restarting.
+- **Controller Panel Navigation**: Once the filter panel is open, browse and adjust all options directly with the controller D-Pad and `A` (PS `×`). While the panel is open, accidental rolls and item bar scrolling are prevented automatically; holding `LB` for the Radial Menu or opening a chat/text input automatically passes inputs through to the game.
 
 ---
 
-### Controls
+### Controls & Operation
 
 #### 1. Main Keyboard Hotkeys (Default)
 
 | Key | Action |
 |---|---|
-| **`U`** | Master toggle: show / hide collision & scene overlay |
+| **`U`** | Master toggle: turn collision & scene visualization ON / OFF |
 | **`I`** | Full Freeze / Resume |
-| **`K`** | World Freeze / Resume (everything paused except the player) |
+| **`K`** | World Freeze / Resume (only the player can move) |
 | **`J`** | Toggle Keep Single-Trigger Hitboxes Active (default ON) |
-| **`O`** | Step +1 frame (while Full or World Freeze is active) |
-| **`P`** | Open / close the interactive Filter & Scene Panel |
-| **`Shift + P`** | Quick-cycle visibility presets without opening the panel |
+| **`O`** | Step +1 frame (active while frozen by `I` or `K`) |
+| **`P`** | Open / close the top-left interactive Filter & Scene Panel |
+| **`Shift + P`** | Cycle scope presets directly without opening the panel |
 
-> - All mod hotkeys pause automatically while typing in in-game chat, search, or naming inputs.
-> - In-game keyboard camera rotation keys (`O / K / L / ;`) are blocked outside text input by default so `K` / `O` never nudge the camera (set `BlockCameraKeys=0` in `debug_hitbox.ini` to disable).
+> - All mod hotkeys automatically pause while typing in in-game chat, search, or naming boxes.
+> - While the mod is active, native keyboard camera rotation keys `O / K / L / ;` are blocked by default (passed through automatically when typing) so pressing `K` or `O` never nudges the camera; set `BlockCameraKeys=0` in `debug_hitbox.ini` to restore them.
 
-#### 2. Interactive `[P]` Panel Controls (Main Page)
+#### 2. Interactive `[P]` Panel Operation (Main Panel)
 
-With the panel open (`P`):
-- **`Up` / `Down`**: Move cursor (supports hold auto-repeat)
-- **`Left` / `Right`**: Adjust value / cycle mode on the selected row
-- **`Space` / `Enter`**: Toggle or step the selected row (row 17 opens the Monster Parts Inspector)
-- **`TAB`**: Switch between Main Panel and Monster Parts Inspector
-- **`P` / `ESC` / `Backspace`**: Close panel
-- **Direct Keyboard Shortcuts**: `1`–`8` toggle the 8 collision categories, `9` hides monster mesh, `0` cycles stage mesh hiding, `-` cycles backdrop/canvas mode, `/` cycles terrain display style, `,` cycles Low/High terrain tier, `.` cycles special terrain layer opacity, `=` flips between `PL+EM ONLY` and `MAP ONLY`. Rows 15 & 16 adjust entity and terrain line width (`0.35x`–`3.00x`).
+After opening the panel with **`P`**:
+- **`Up` / `Down`**: Move cursor up/down (supports hold auto-repeat)
+- **`Left` / `Right`**: Adjust the selected row's option or value left/right
+- **`Space` / `Enter`**: Toggle the selected row or step its mode (on row 17, opens the Monster Parts Inspector)
+- **`TAB`**: Switch between the Main Panel and the Monster Parts Inspector
+- **`P` / `ESC` / `Backspace`**: Close the panel
+- **Direct Single-Row Shortcuts (Keyboard Only)**:
 
-#### 3. `[P]` → `[TAB]` Monster Parts Inspector
+| Shortcut | Row | Description |
+|---|---|---|
+| `Left` / `Right` (Row 0) | Scope Preset | Cycle `PL+EM COMBAT` / `PL+EM ONLY` / `MAP ONLY` / `HITBOX ONLY` / `HURTBOX ONLY` / `ALL (8/8)` |
+| **`=`** | Flip Entity Scope | One-key toggle between `PL+EM ONLY` and `MAP ONLY` |
+| **`1`** | Player Hurtbox | Toggle player hurtbox and defensive frame state |
+| **`2`** | Player Hitbox | Toggle player weapon/ammo/Kinsect/Clutch Claw hitboxes |
+| **`3`** | Palico / Otomo | Toggle Palico hurtboxes & hitboxes |
+| **`4`** | Monster Hurtbox | Toggle monster hurtboxes |
+| **`5`** | Monster Hitbox | Toggle monster melee/breath/projectile hitboxes |
+| **`6`** | Body Pushbox | Toggle player & monster physical pushboxes |
+| **`7`** | Map Entities | Toggle map interactive entity collision volumes |
+| **`8`** | Map Terrain | Toggle terrain collision mesh (select this row and press `Left` / `Right` to switch radius `15m / 25m / 45m / 80m`) |
+| **`9`** | Hide Monster Mesh | Toggle hiding monster models |
+| **`0`** | Hide Map / Stage Mesh | Cycle `OFF` / `KEEP INTERACT` / `HIDE ALL MAP` |
+| **`-`** | Pure 3D / Canvas | Cycle `OFF` / `HIDE PL/VFX` / `HIDE ALL 3D` / `DIM 45%` |
+| **`/`** | Terrain Style & Rings | Cycle 6 terrain styles (semi-transparent 3D, opaque solid 3D, ground distance rings, raw wireframe) |
+| **`,`** | SBC Collision Tier | Cycle `LOW ONLY` / `LOW + HIGH` / `HIGH ONLY` |
+| **`.`** | Special SBC Layers | Cycle special non-solid layer opacity: `OFF` / `GHOST` / `LIGHT` / `MED` / `VIVID` / `OPAQUE` |
+| `Left` / `Right` (Row 15) | Entity Line Width | Adjust monster/player/entity line thickness (`0.35x` ~ `3.00x`) |
+| `Left` / `Right` (Row 16) | SBC / Raw Line Width | Adjust terrain mesh / raw wireframe / ground ring line thickness (`0.35x` ~ `3.00x`) |
+| **`TAB`** (or Row 17) | Monster Part Filter | Press `Left` / `Right` on this row to quick-switch partition mode; press `Space` / `Enter` to open the Monster Parts Inspector |
 
-- **Control rows (0–4)**: Partition Mode (`OFF` / `HITZONE` / `CLUTCH`), Unselected Parts (`HIDE` / `GHOST OUTLINE`), 3D Part Labels, Target Monster (`AUTO (SOLO)` / `AUTO (+OTHERS)` / `LOCK #1..#8`), and Quick Part Select (`Space`/`Enter` toggles All vs Solo; `Left`/`Right` steps through parts one by one in Solo mode).
-- **Part rows**: `Space` / `Enter` / `Left` / `Right` toggles the highlighted part; keyboard `1`–`0`, `-`, `/`, `,`, `.` toggle the first 14 parts directly; `=` toggles Solo on the highlighted part.
-- **Return to Main Panel**: Press **`TAB`**, or move to the bottom **`<<< BACK TO MAIN PANEL`** row (press `Up` once from row 0 to wrap directly to it) and press `Space` / `Enter` / `A`.
+#### 3. `[P]` → `[TAB]` Monster Parts Inspector Operation
 
-#### 4. Controller Controls for the `[P]` Panel
+- **Top Control Rows (Rows 0–4)**:
+  - `PARTITION MODE`: Switch `OFF` / `HITZONE (FINE)` / `CLUTCH (SOFTEN)`
+  - `UNSELECTED PARTS`: Switch unselected parts between `HIDE` and `GHOST OUTLINE`
+  - `3D PART LABELS`: Switch 3D floating labels between `PHYS + ELEM + EXT` / `PHYS + EXTRACT` / `ID + EXTRACT` / `OFF`
+  - `TARGET MONSTER`: Switch `AUTO (SOLO)` / `AUTO (+OTHERS)` / locked target `#1..#8`
+  - `QUICK PART SELECT`: Press `Space` / `Enter` to toggle between All On and Solo; press `Left` / `Right` to step through parts one by one in Solo mode
+- **Part List Rows**: Press `Space` / `Enter` / `Left` / `Right` to toggle the selected part; on keyboard, press `1`–`0`, `-`, `/`, `,`, `.` to quick-toggle the first 14 parts, or press **`=`** to solo / un-solo the highlighted part.
+- **Return to Main Panel**: Press **`TAB`**, or move the cursor to the bottom row **`<<< BACK TO MAIN PANEL`** (press `Up` once from row 0 to wrap straight to it) and press `Space` / `Enter` / `A`.
 
-When the `[P]` panel is open (keyboard single-row shortcuts do not apply to controllers):
+#### 4. Controller Operation for the `[P]` Panel
+
+When the `[P]` panel is open, you can control it directly with a controller (keyboard single-row number/symbol shortcuts do not apply to controllers):
 
 | Controller Input | Equivalent Action |
 |---|---|
-| **D-Pad `Up` / `Down`** | Move cursor (supports hold auto-repeat) |
-| **D-Pad `Left` / `Right`** | Adjust value / step mode |
-| **`A` (Xbox) / `Cross` (PS)** | Same as `Space` (toggle, step, enter/exit Monster Parts page) |
-| **Hold `LB`** | Temporarily passes controller input to the game so you can switch Radial Menu wheels and trigger shoutouts while the panel is open |
+| **D-Pad `Up` / `Down`** | Move cursor up/down (supports hold auto-repeat) |
+| **D-Pad `Left` / `Right`** | Adjust the selected row's option or toggle |
+| **`A` (Xbox `A` / PS `×`)** | Same as keyboard `Space` (toggle, step mode, enter/exit the Monster Parts sub-panel) |
+| **Hold `LB`** | Temporarily passes controller input through so you can switch Radial Menu wheels and send shoutouts while the panel is open |
 
-#### 5. In-Game Chat & Radial Shoutout Commands
+#### 5. In-Game Chat / Radial Shoutout Triggers
 
-Exact string match triggers ONLY the 6 main actions (works with typed chat and Radial Menu custom shoutouts):
+Supports triggering ONLY the 6 core main hotkeys via **exact full-string match** (works by typing directly in in-game chat or binding custom shoutouts to the Radial Menu):
 
-| Action | Default Chat / Shoutout Command | `debug_hitbox.ini` Key |
-|---|---|---|
-| **`U`** — Toggle Hitbox / Overlay | `$draw_hitbox` | `ChatCmdVis` |
-| **`I`** — Full Freeze / Resume | `$full_freeze` | `ChatCmdFreeze` |
-| **`K`** — World Freeze / Resume | `$ThE_WoRLD!!!` | `ChatCmdWorldFreeze` |
-| **`O`** — Step +1 Frame | `$step_frame` | `ChatCmdStep` |
-| **`J`** — Keep Hitboxes Active | `$keep_hitbox` | `ChatCmdKeepHitbox` |
-| **`P`** — Open / Close Panel | `$show_panel` | `ChatCmdPanel` |
+| Main Hotkey | Action | Default Trigger String | `.ini` Key |
+|---|---|---|---|
+| **`U`** | Toggle hitbox & scene visualization | `$draw_hitbox` | `ChatCmdVis` |
+| **`I`** | Full Freeze / Resume | `$full_freeze` | `ChatCmdFreeze` |
+| **`K`** | World Freeze / Resume | `$ThE_WoRLD!!!` | `ChatCmdWorldFreeze` |
+| **`O`** | Step +1 frame | `$step_frame` | `ChatCmdStep` |
+| **`J`** | Toggle Keep Single-Trigger Hitboxes Active | `$keep_hitbox` | `ChatCmdKeepHitbox` |
+| **`P`** | Open / close filter panel | `$show_panel` | `ChatCmdPanel` |
 
-- Case-insensitive for ASCII letters by default (`ChatCaseSensitive=0`; set to `1` for strict case-sensitive match).
-- **Hot-Reload**: Edit and save `nativePC\plugins\debug_hitbox.ini` at any time while the game is running (save as UTF-8 for non-ASCII shoutouts). New command strings take effect on the very next chat message or panel open—no restart required. Set any command to empty or `NONE` to disable it.
+- **Case-insensitive for ASCII letters by default** (`ChatCaseSensitive=0`); change to `1` in `debug_hitbox.ini` to require strict case-sensitive matching.
+- **Customization & Hot-Reload**: Edit and save `nativePC\plugins\debug_hitbox.ini` at any time while the game is running (save as UTF-8 when using Chinese/Japanese shoutouts). Changes take effect on the very next chat/shoutout or panel open without restarting the game. Leave any entry empty or set it to `NONE` to disable that individual command.
 
 ---
 
-### Configuration (`nativePC\plugins\debug_hitbox.ini`)
+### Configuration File (`nativePC\plugins\debug_hitbox.ini`)
 
-A complete default `debug_hitbox.ini` is bundled with the release. All entries are optional and fall back to defaults if omitted:
-- **Hotkeys**: `KeyToggleVis`, `KeyToggleFreeze`, `KeyFreezeOthers`, `KeyPersistHitbox`, `KeyStepFrame`, `KeyCycleFilter`
-- **Behavior**: `Enabled`, `StartVisOn`, `KeepHitboxesActive`, `BlockCameraKeys`, `ShowHudBanner`
-- **Chat & Controller (Hot-Reloadable)**: `ChatCommands`, `ChatCaseSensitive`, `ChatCmdVis`, `ChatCmdFreeze`, `ChatCmdWorldFreeze`, `ChatCmdStep`, `ChatCmdKeepHitbox`, `ChatCmdPanel`, `GamepadPanel`
-- **Appearance & Defaults**: `LineThickness`, `EntityLineScale`, `SbcLineScale`, `OpacityScale`, `SbcSurfaceOpacity`, `HdrNits`, `CategoryMask`, `SbcRadiusMeters`, `StartHideMonster`, `StartHideStage`, `StartBackdrop`, `DepthGuideMode`, `SbcMeshTier`, `SpecialSbcStyle`, `EmPartMode`, `EmUnselectedStyle`, `EmPartLabels`
+A default `debug_hitbox.ini` containing all default values is included in the archive. Every entry is optional and uses its default value if omitted:
+
+| Option | Default | Description |
+|---|---|---|
+| `Enabled` | `1` | Master plugin toggle (`1` enabled / `0` disabled) |
+| `KeyToggleVis` / `KeyToggleFreeze` / `KeyFreezeOthers` / `KeyPersistHitbox` / `KeyStepFrame` / `KeyCycleFilter` | `U` / `I` / `K` / `J` / `O` / `P` | Customize the 6 main hotkeys (supports letters, digits, `F1`–`F24`, `NUMPAD0`–`9`, etc.) |
+| `StartVisOn` | `0` | Whether visualization starts ON automatically at game launch |
+| `KeepHitboxesActive` | `1` | Keep single-trigger hitboxes active by default during World Freeze |
+| `BlockCameraKeys` | `1` | Block in-game `O / K / L / ;` camera rotation keys |
+| `ShowHudBanner` | `1` | Show top-left HUD status banner |
+| `ChatCommands` | `1` | Enable/disable chat & shoutout triggers (hot-reloadable) |
+| `ChatCaseSensitive` | `0` | Whether chat commands are ASCII case-sensitive (hot-reloadable) |
+| `ChatCmdVis` / `ChatCmdFreeze` / `ChatCmdWorldFreeze` / `ChatCmdStep` / `ChatCmdKeepHitbox` / `ChatCmdPanel` | `$draw_hitbox` / `$full_freeze` / `$ThE_WoRLD!!!` / `$step_frame` / `$keep_hitbox` / `$show_panel` | Customize the 6 chat/shoutout trigger strings (UTF-8, hot-reloadable) |
+| `GamepadPanel` | `1` | Enable/disable controller navigation for the `[P]` panel (hot-reloadable) |
+| `LineThickness` / `EntityLineScale` / `SbcLineScale` | `2.0` / `1.0` / `1.0` | Base line thickness and entity/terrain line width multipliers |
+| `OpacityScale` / `SbcSurfaceOpacity` / `HdrNits` | `1.0` / `1.0` / `0` | Global opacity, semi-transparent terrain surface opacity, and HDR luminance (`0` = auto) |
+| `CategoryMask` / `SbcRadiusMeters` | `0x1B` / `25` | Default enabled category bitmask and terrain display radius |
+| `StartHideMonster` / `StartHideStage` / `StartBackdrop` | `0` / `0` / `0` | Default model hiding and pure collision canvas modes |
+| `DepthGuideMode` / `SbcMeshTier` / `SpecialSbcStyle` | `0` / `1` / `2` | Default terrain display style, collision tier, and special layer style |
+| `EmPartMode` / `EmUnselectedStyle` / `EmPartLabels` | `0` / `0` / `0` | Default monster part partition mode, unselected part style, and 3D label mode |
