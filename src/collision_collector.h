@@ -22,7 +22,8 @@ struct FrameStats {
     std::uint32_t otherShapes         = 0;
     std::uint32_t opaqueTriVerts      = 0; // [0 .. opaqueTriVerts): Pass 1 opaque .sbc tris (PSDepthClip + DepthWrite)
     std::uint32_t sceneDepthEndVert   = 0; // [opaqueTriVerts .. sceneDepthEndVert): Pass 2 .sbc faces/creases/rings (PSDepthClip + AlphaBlend)
-    std::uint32_t worldOverlayEndVert = 0; // [sceneDepthEndVert .. worldOverlayEndVert): Pass 3 entity 3D hitboxes/hurtboxes (pre-UI restore!)
+    std::uint32_t worldOverlayEndVert = 0; // [sceneDepthEndVert .. worldOverlayEndVert): Pass 3a entity 3D hitboxes/hurtboxes
+    std::uint32_t preUiLabelEndVert   = 0; // [worldOverlayEndVert .. preUiLabelEndVert): Pass 3b 3D part labels (Depth OFF, pre-UI restore!)
     float projM32                     = 10.0f; // |proj[14]| for exact Reversed-Z <-> world cm conversion
     float projM22                     = 0.0f;  // ||proj[10]| - 1| = zNear / (zFar - zNear)
     bool hasCamera                    = false;

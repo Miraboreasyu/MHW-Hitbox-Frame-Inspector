@@ -39,6 +39,8 @@ std::atomic<std::uint32_t> g_worldSettledTicks{0};
 int g_suppressKbFramesLeft = 0;
 std::atomic<std::uintptr_t> g_cachedMainPlayer{0};
 std::atomic<std::uintptr_t> g_cachedActiveCam{0};
+std::uintptr_t g_worldFreezeOwnerPl = 0;
+int g_worldFreezeNullPlFrames = 0;
 bool g_prevPlActionDef = false;
 
 constexpr std::uint8_t kMoveFlagWorldFreeze  = 0x01U;
@@ -1044,6 +1046,8 @@ void SetFrozen(std::uintptr_t exeBase, bool frozen) {
             g_worldFrozen.store(false, std::memory_order_release);
             g_worldStepActive.store(false, std::memory_order_relaxed);
             g_worldStepReq.store(0, std::memory_order_relaxed);
+            g_worldFreezeOwnerPl = 0;
+            g_worldFreezeNullPlFrames = 0;
             ClearWorldEffectsTable();
             ClearPinnedNodesTable();
         }
@@ -1073,6 +1077,8 @@ void SetWorldFrozen(std::uintptr_t exeBase, bool worldFrozen) {
             g_frozen.store(false, std::memory_order_release);
         }
         UpdateLiveCamSnapshotSEH(exeBase, false, true);
+        g_worldFreezeOwnerPl      = g_cachedMainPlayer.load(std::memory_order_relaxed);
+        g_worldFreezeNullPlFrames = 0;
         ClearWorldEffectsTable();
         ClearPinnedNodesTable();
         g_prevPlActionDef = false;
@@ -1087,6 +1093,8 @@ void SetWorldFrozen(std::uintptr_t exeBase, bool worldFrozen) {
         g_worldFrozen.store(false, std::memory_order_release);
         g_worldStepReq.store(0, std::memory_order_relaxed);
         g_worldStepActive.store(false, std::memory_order_relaxed);
+        g_worldFreezeOwnerPl      = 0;
+        g_worldFreezeNullPlFrames = 0;
         RefreshUnitMoveFlags();
         ClearWorldEffectsTable();
         ClearPinnedNodesTable();
@@ -1143,9 +1151,26 @@ bool SyncActiveFrame(std::uintptr_t exeBase, bool anyModKeyHeld) {
     }
 
     const bool fullFrz  = g_frozen.load(std::memory_order_relaxed);
-    const bool worldFrz = g_worldFrozen.load(std::memory_order_relaxed);
+    bool worldFrz       = g_worldFrozen.load(std::memory_order_relaxed);
     if (suppressNow || worldFrz) {
         UpdateLiveCamSnapshotSEH(exeBase, suppressNow, worldFrz);
+    }
+    if (worldFrz) {
+        const std::uintptr_t curPl = g_cachedMainPlayer.load(std::memory_order_relaxed);
+        if (g_worldFreezeOwnerPl == 0) {
+            if (curPl != 0) {
+                g_worldFreezeOwnerPl      = curPl;
+                g_worldFreezeNullPlFrames = 0;
+            }
+        } else if (curPl == g_worldFreezeOwnerPl) {
+            g_worldFreezeNullPlFrames = 0;
+        } else if (curPl != 0 || ++g_worldFreezeNullPlFrames >= 15) {
+            app::Log("freeze: stage/quest transition detected (pl %p -> %p), auto-resuming World Freeze",
+                     reinterpret_cast<void*>(g_worldFreezeOwnerPl),
+                     reinterpret_cast<void*>(curPl));
+            SetWorldFrozen(exeBase, false);
+            worldFrz = false;
+        }
     }
     if (fullFrz) {
         ApplyMainFreezeSEH(exeBase, 3);

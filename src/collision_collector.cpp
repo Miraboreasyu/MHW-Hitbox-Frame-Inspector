@@ -3219,8 +3219,10 @@ void CollectSnapshotSEH(std::uintptr_t exeBase,
                 }
             }
         }
+        const bool needEmInspector = (viewState.emPartMode != app::EmPartMode::Off) ||
+                                     (viewState.panelOpen && viewState.panelPage == 1);
         if (!outSnap->hasCamera || (visMask & app::kCatMaskAll) == 0) {
-            if (viewState.panelOpen && viewState.panelPage == 1) {
+            if (needEmInspector) {
                 const std::uintptr_t sEnemy = *reinterpret_cast<const std::uintptr_t*>(exeBase + mhw::kRvaSEnemyInstance);
                 HarvestMonstersWithPartFilter(sEnemy, false, exeBase, exeEnd, viewState, *outSnap);
             }
@@ -3239,7 +3241,7 @@ void CollectSnapshotSEH(std::uintptr_t exeBase,
 
         const std::uint32_t entityBits = visMask & ~std::uint32_t(app::kCatStageMesh);
         if (entityBits == 0) {
-            if (viewState.panelOpen && viewState.panelPage == 1) {
+            if (needEmInspector) {
                 const std::uintptr_t sEnemy = *reinterpret_cast<const std::uintptr_t*>(exeBase + mhw::kRvaSEnemyInstance);
                 HarvestMonstersWithPartFilter(sEnemy, false, exeBase, exeEnd, viewState, *outSnap);
             }
@@ -3269,9 +3271,7 @@ void CollectSnapshotSEH(std::uintptr_t exeBase,
         }
 
         // 4. Direct Monster Collision Components (+ Monster Part Partitioning & Pushbox Binding)
-        const bool wantAnyMonster  = (visMask & (app::kCatEmHurtbox | app::kCatEmHitbox | app::kCatPushbox)) != 0;
-        const bool needEmInspector = (viewState.emPartMode != app::EmPartMode::Off) ||
-                                     (viewState.panelOpen && viewState.panelPage == 1);
+        const bool wantAnyMonster = (visMask & (app::kCatEmHurtbox | app::kCatEmHitbox | app::kCatPushbox)) != 0;
         const std::uintptr_t sEnemy = *reinterpret_cast<const std::uintptr_t*>(exeBase + mhw::kRvaSEnemyInstance);
         if ((wantAnyMonster || needEmInspector) && IsAlignedPtr(sEnemy)) {
             HarvestMonstersWithPartFilter(sEnemy, wantAnyMonster, exeBase, exeEnd, viewState, *outSnap);
@@ -4466,9 +4466,7 @@ void EmitMonsterPart3DLabels(std::vector<OverlayVertex>& outVerts,
     if (vs.emPartMode == app::EmPartMode::Off || vs.emLabelMode == app::EmPartLabelMode::Off) return;
     if (!g_emInspector.hasTarget || g_emInspector.partCount == 0) return;
 
-    const bool wantHurt = (vs.visMask & app::kCatEmHurtbox) != 0U;
     const bool wantPush = (vs.visMask & app::kCatPushbox) != 0U;
-    if (!wantHurt && !wantPush) return;
 
     auto clampA = [&](float a) noexcept -> float {
         const float v = a * alphaMul;
@@ -4501,8 +4499,7 @@ void EmitMonsterPart3DLabels(std::vector<OverlayVertex>& outVerts,
         if ((vs.emPartMask & (1U << s)) == 0U) continue;
         const EmPartSlotInfo& ps = g_emInspector.parts[s];
         if (ps.anchorWeight <= 1e-4f) continue;
-        if (!wantHurt && ps.pushCount == 0) continue;
-        if (wantHurt && !wantPush && ps.hurtCount == 0) continue;
+        if (ps.isAuxCenter && ps.hurtCount == 0 && !wantPush) continue;
 
         const float invW = 1.0f / ps.anchorWeight;
         const Vec3 worldPt{ps.anchorSum[0] * invW, ps.anchorSum[1] * invW, ps.anchorSum[2] * invW};
@@ -5858,37 +5855,35 @@ void BuildOverlayFrame(std::uintptr_t exeBase,
             }
         }
 
-        // 2d. Optional Floating 3D Monster Part Callouts (drawn in Pass 3 BEFORE 2D Player UI Restore!)
-        if (viewState.emPartMode != app::EmPartMode::Off &&
-            viewState.emLabelMode != app::EmPartLabelMode::Off) {
-            EmitMonsterPart3DLabels(outVerts, proj, csEnc, viewState, px, resScale, alphaMul);
-        }
-
-        // End of Pass 3: [sceneDepthEndVert .. worldOverlayEndVert) completes BEFORE 2D Player UI Restore!
+        // End of Pass 3a: [sceneDepthEndVert .. worldOverlayEndVert) 3D entity wireframes
         outStats.worldOverlayEndVert = static_cast<std::uint32_t>(outVerts.size());
         proj.zBiasCm = 0.0f;
     }
 
-    // 3. 2D Top-Left Status HUD Banner + Interactive [P] Filter & Scene Panel
+    // 2d. Pass 3b: Floating 3D Monster Part Callouts (drawn with Depth OFF so Opaque .SBC terrain
+    //     never clips z=0 badges, yet STILL before Pass 4 2D Player UI Restore so HUD/Panel stay on top!)
+    if (visEnabled && snap.hasCamera &&
+        viewState.emPartMode != app::EmPartMode::Off &&
+        viewState.emLabelMode != app::EmPartLabelMode::Off) {
+        EmitMonsterPart3DLabels(outVerts, proj, csEnc, viewState, px, resScale, alphaMul);
+    }
+    outStats.preUiLabelEndVert = static_cast<std::uint32_t>(outVerts.size());
+
+    // 3. 2D Top-Left Status HUD Banner + Prominent Freeze Alert + Interactive [P] Filter & Scene Panel
     const float x0 = 18.0f * resScale;
     const float y0 = 18.0f * resScale;
-    float panelTopY = y0;
+    float panelTopY     = y0;
+    float leftBarRight  = x0;
+    float leftBarBottom = y0;
 
     if (cfg.showHudBanner && (visEnabled || anyFreeze || viewState.panelOpen || anySceneMod || showStartupToast)) {
-        const char* freezeStr = "OFF";
-        if (freezeMode == freeze::Mode::Full) {
-            freezeStr = "ALL ([O] STEP)";
-        } else if (freezeMode == freeze::Mode::World) {
-            freezeStr = freeze::IsKeepHitboxesActive()
-                            ? "WORLD ([O] STEP [J] KEEP:ON)"
-                            : "WORLD ([O] STEP [J] KEEP:OFF)";
-        }
-
-        char line1[280]{};
+        char linePrefix[260]{};
+        char freezeSeg[40]{};
+        char tailSeg[16]{};
         char stateSeg[48]{};
 
         if (!visEnabled && !anyFreeze && !viewState.panelOpen && !anySceneMod && showStartupToast) {
-            std::snprintf(line1, sizeof(line1),
+            std::snprintf(linePrefix, sizeof(linePrefix),
                           "MHW HFI READY  |  [U] VIS  [I] FREEZE  [K] WORLD  [J] KEEP  [O] +1F  [P] PANEL");
         } else {
             char mapSeg[48]{};
@@ -5928,24 +5923,35 @@ void BuildOverlayFrame(std::uintptr_t exeBase,
                 std::snprintf(sceneSeg, sizeof(sceneSeg), "  |  HIDE:PL");
             }
 
-            std::snprintf(line1, sizeof(line1),
-                          "VIS:%s [%s]  PL:%u/%u EM:%u/%u%s%s%s  |  FREEZE:%s  [P]",
+            std::snprintf(linePrefix, sizeof(linePrefix),
+                          "VIS:%s [%s]  PL:%u/%u EM:%u/%u%s%s%s  |  ",
                           visEnabled ? "ON" : "OFF",
                           app::MatchPresetName(viewState.visMask),
                           outStats.playerHurtbox, outStats.playerHitboxes,
                           outStats.monsterHurtbox, outStats.monsterHitbox,
                           partSeg,
                           mapSeg,
-                          sceneSeg,
-                          freezeStr);
+                          sceneSeg);
+
+            if (freezeMode == freeze::Mode::Full) {
+                std::snprintf(freezeSeg, sizeof(freezeSeg), "FREEZE:ALL");
+            } else if (freezeMode == freeze::Mode::World) {
+                std::snprintf(freezeSeg, sizeof(freezeSeg), "FREEZE:WORLD");
+            } else {
+                std::snprintf(freezeSeg, sizeof(freezeSeg), "FREEZE:OFF");
+            }
+            std::snprintf(tailSeg, sizeof(tailSeg), "  [P]");
+
             if (snap.mainPlDef.valid) {
                 std::snprintf(stateSeg, sizeof(stateSeg), "  |  FRAME:%s", snap.mainPlDef.badge);
             }
         }
 
-        const std::size_t len1 = std::strlen(line1);
-        const std::size_t len2 = std::strlen(stateSeg);
-        const float textW1 = static_cast<float>(len1 + len2) * 6.0f * px;
+        const std::size_t lenPre  = std::strlen(linePrefix);
+        const std::size_t lenFrz  = std::strlen(freezeSeg);
+        const std::size_t lenTail = std::strlen(tailSeg);
+        const std::size_t lenSt   = std::strlen(stateSeg);
+        const float textW1 = static_cast<float>(lenPre + lenFrz + lenTail + lenSt) * 6.0f * px;
         const bool showLegendBar = visEnabled && !viewState.panelOpen;
         const float minLegendW = showLegendBar ? (66.0f * 6.0f * 0.85f * px) : 0.0f;
         const float boxInnerW = (textW1 > minLegendW) ? textW1 : minLegendW;
@@ -5955,26 +5961,40 @@ void BuildOverlayFrame(std::uintptr_t exeBase,
         const float barH = 7.0f * px + padY * 2.0f + (showLegendBar ? (10.0f * px) : 0.0f);
 
         Color4 accentSrgb = {0.15f, 0.90f, 0.65f, 0.95f};
-        if (freezeMode == freeze::Mode::Full)       accentSrgb = {1.00f, 0.30f, 0.20f, 0.95f};
-        else if (freezeMode == freeze::Mode::World) accentSrgb = {1.00f, 0.68f, 0.14f, 0.95f};
+        if (freezeMode == freeze::Mode::Full)       accentSrgb = {1.00f, 0.28f, 0.20f, 0.98f};
+        else if (freezeMode == freeze::Mode::World) accentSrgb = {1.00f, 0.72f, 0.12f, 0.98f};
 
-        proj.emitRect2D(outVerts, x0, y0, x0 + boxInnerW + padX * 2.0f, y0 + barH,
+        leftBarRight  = x0 + boxInnerW + padX * 2.0f;
+        leftBarBottom = y0 + barH;
+
+        proj.emitRect2D(outVerts, x0, y0, leftBarRight, leftBarBottom,
                         csEnc.encode({0.05f, 0.06f, 0.09f, 0.82f}));
-        proj.emitRect2D(outVerts, x0, y0, x0 + 3.5f * resScale, y0 + barH,
+        proj.emitRect2D(outVerts, x0, y0, x0 + 3.5f * resScale, leftBarBottom,
                         csEnc.encode(accentSrgb));
 
         const Color4 colTextMain = csEnc.encode({0.95f, 0.97f, 1.00f, 0.96f});
-        DrawText5x7(outVerts, proj, x0 + padX, y0 + padY, px, line1, colTextMain);
+        float tx = x0 + padX;
+        DrawText5x7(outVerts, proj, tx, y0 + padY, px, linePrefix, colTextMain);
+        tx += static_cast<float>(lenPre) * 6.0f * px;
 
-        if (len2 > 0) {
+        if (lenFrz > 0) {
+            Color4 frzTextCol = colTextMain;
+            if (freezeMode == freeze::Mode::Full)       frzTextCol = csEnc.encode({1.00f, 0.36f, 0.28f, 1.00f});
+            else if (freezeMode == freeze::Mode::World) frzTextCol = csEnc.encode({1.00f, 0.82f, 0.22f, 1.00f});
+            DrawText5x7(outVerts, proj, tx, y0 + padY, px, freezeSeg, frzTextCol);
+            tx += static_cast<float>(lenFrz) * 6.0f * px;
+        }
+        if (lenTail > 0) {
+            DrawText5x7(outVerts, proj, tx, y0 + padY, px, tailSeg, colTextMain);
+            tx += static_cast<float>(lenTail) * 6.0f * px;
+        }
+        if (lenSt > 0) {
             float dummyHt = 0.0f;
             Color4 badgeSrgb = PlayerDefSrgbColor(snap.mainPlDef.state, 0.98f, baseHalfThick, dummyHt);
             if (snap.mainPlDef.state == PlayerDefState::Normal) {
                 badgeSrgb = {0.72f, 0.88f, 0.98f, 0.95f};
             }
-            DrawText5x7(outVerts, proj,
-                        x0 + padX + static_cast<float>(len1) * 6.0f * px,
-                        y0 + padY, px, stateSeg, csEnc.encode(badgeSrgb));
+            DrawText5x7(outVerts, proj, tx, y0 + padY, px, stateSeg, csEnc.encode(badgeSrgb));
         }
 
         if (showLegendBar) {
@@ -5997,7 +6017,92 @@ void BuildOverlayFrame(std::uintptr_t exeBase,
             drawChip("SBC",     {0.94f, 0.64f, 0.24f, 0.95f});
         }
 
-        panelTopY = y0 + barH + 6.0f * resScale;
+        panelTopY = leftBarBottom + 6.0f * resScale;
+
+        // Prominent Top-Center Freeze Pill + 4 Viewfinder Corner Brackets (unmistakable even when VIS:OFF!)
+        if (anyFreeze) {
+            const bool isFull = (freezeMode == freeze::Mode::Full);
+            const Color4 borderCol = csEnc.encode(isFull ? Color4{1.00f, 0.24f, 0.18f, 0.98f}
+                                                         : Color4{1.00f, 0.72f, 0.12f, 0.98f});
+            const Color4 bgCol     = csEnc.encode(isFull ? Color4{0.20f, 0.03f, 0.03f, 0.90f}
+                                                         : Color4{0.20f, 0.12f, 0.02f, 0.90f});
+            const Color4 titleCol  = csEnc.encode(isFull ? Color4{1.00f, 0.95f, 0.95f, 1.00f}
+                                                         : Color4{1.00f, 0.93f, 0.58f, 1.00f});
+            const Color4 subCol    = csEnc.encode({0.93f, 0.95f, 0.98f, 0.95f});
+            const Color4 brkCol    = csEnc.encode(isFull ? Color4{1.00f, 0.26f, 0.20f, 0.85f}
+                                                         : Color4{1.00f, 0.74f, 0.14f, 0.85f});
+
+            // 4 sleek viewfinder corner brackets around the screen perimeter
+            const float bm = 8.0f * resScale;
+            const float bl = 32.0f * resScale;
+            const float bt = 3.0f * resScale;
+            // Top-Left
+            proj.emitRect2D(outVerts, bm, bm, bm + bl, bm + bt, brkCol);
+            proj.emitRect2D(outVerts, bm, bm + bt, bm + bt, bm + bl, brkCol);
+            // Top-Right
+            proj.emitRect2D(outVerts, screenW - bm - bl, bm, screenW - bm, bm + bt, brkCol);
+            proj.emitRect2D(outVerts, screenW - bm - bt, bm + bt, screenW - bm, bm + bl, brkCol);
+            // Bottom-Left
+            proj.emitRect2D(outVerts, bm, screenH - bm - bt, bm + bl, screenH - bm, brkCol);
+            proj.emitRect2D(outVerts, bm, screenH - bm - bl, bm + bt, screenH - bm - bt, brkCol);
+            // Bottom-Right
+            proj.emitRect2D(outVerts, screenW - bm - bl, screenH - bm - bt, screenW - bm, screenH - bm, brkCol);
+            proj.emitRect2D(outVerts, screenW - bm - bt, screenH - bm - bl, screenW - bm, screenH - bm - bt, brkCol);
+
+            // Top-Center bold Freeze Banner Pill
+            const char* titleStr = isFull ? "FULL FREEZE" : "WORLD FREEZE";
+            const char* subStr   = isFull
+                                       ? "[I] RESUME   [O] +1F"
+                                       : (freeze::IsKeepHitboxesActive()
+                                              ? "[K] RESUME   [O] +1F   [J] KEEP:ON"
+                                              : "[K] RESUME   [O] +1F   [J] KEEP:OFF");
+
+            const float fpx      = std::floor(px * 1.45f + 0.5f);
+            const float spx      = px;
+            const float iconBarW = 2.0f * fpx;
+            const float iconGap  = 1.5f * fpx;
+            const float iconW    = iconBarW * 2.0f + iconGap;
+            const float iconPad  = 3.5f * fpx;
+            const float titleTxtW = static_cast<float>(std::strlen(titleStr)) * 6.0f * fpx - fpx;
+            const float row1W    = iconW + iconPad + titleTxtW;
+            const float row2W    = static_cast<float>(std::strlen(subStr)) * 6.0f * spx - spx;
+            const float innerW   = (row1W > row2W) ? row1W : row2W;
+
+            const float pPadX    = 18.0f * resScale;
+            const float pPadY    = 7.0f * resScale;
+            const float rowGap   = 5.0f * resScale;
+            const float pillW    = innerW + pPadX * 2.0f;
+            const float pillH    = 7.0f * fpx + rowGap + 7.0f * spx + pPadY * 2.0f;
+            const float pillX0   = std::floor((screenW - pillW) * 0.5f);
+            const float pillY0   = (leftBarRight + 14.0f * resScale > pillX0)
+                                       ? (leftBarBottom + 8.0f * resScale)
+                                       : y0;
+            const float pillX1   = pillX0 + pillW;
+            const float pillY1   = pillY0 + pillH;
+            const float bTh      = 2.5f * resScale;
+            const float sideBarW = 5.0f * resScale;
+
+            // Tinted dark body + solid left/right side accent tabs + full 2.5px vivid border
+            proj.emitRect2D(outVerts, pillX0, pillY0, pillX1, pillY1, bgCol);
+            proj.emitRect2D(outVerts, pillX0, pillY0, pillX0 + sideBarW, pillY1, borderCol);
+            proj.emitRect2D(outVerts, pillX1 - sideBarW, pillY0, pillX1, pillY1, borderCol);
+            proj.emitRect2D(outVerts, pillX0 - bTh, pillY0 - bTh, pillX1 + bTh, pillY0, borderCol);
+            proj.emitRect2D(outVerts, pillX0 - bTh, pillY1, pillX1 + bTh, pillY1 + bTh, borderCol);
+            proj.emitRect2D(outVerts, pillX0 - bTh, pillY0, pillX0, pillY1, borderCol);
+            proj.emitRect2D(outVerts, pillX1, pillY0, pillX1 + bTh, pillY1, borderCol);
+
+            // Row 1: Crisp geometric pause icon || + bold title
+            const float row1X = pillX0 + std::floor((pillW - row1W) * 0.5f);
+            const float row1Y = pillY0 + pPadY;
+            proj.emitRect2D(outVerts, row1X, row1Y, row1X + iconBarW, row1Y + 7.0f * fpx, borderCol);
+            proj.emitRect2D(outVerts, row1X + iconBarW + iconGap, row1Y, row1X + iconW, row1Y + 7.0f * fpx, borderCol);
+            DrawText5x7(outVerts, proj, row1X + iconW + iconPad, row1Y, fpx, titleStr, titleCol);
+
+            // Row 2: Action hotkey reminder
+            const float row2X = pillX0 + std::floor((pillW - row2W) * 0.5f);
+            const float row2Y = row1Y + 7.0f * fpx + rowGap;
+            DrawText5x7(outVerts, proj, row2X, row2Y, spx, subStr, subCol);
+        }
     }
 
     if (viewState.panelOpen) {

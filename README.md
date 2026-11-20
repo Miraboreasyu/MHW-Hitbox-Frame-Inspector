@@ -50,8 +50,8 @@
 - **纯碰撞 3D / 画布模式**：支持隐藏玩家与特效（`HIDE PL/VFX`）、全 3D 模型隐藏获得纯黑底碰撞画布（`HIDE ALL 3D`），以及仅柔暗 3D 背景而保持 UI 满亮度的 `DIM 45%`。
 
 #### 4. 零延迟冻结、世界冻结与单帧步进
-- **全局冻结（Full Freeze）**：瞬时零延迟定格整个游戏，冻结期间可自由调整面板筛选与观察细节。
-- **世界冻结（World Freeze）**：仅暂停怪物、弹道/吐息特效、随从与机关，玩家与武器照常自由行动，便于测试招式判定、打点、翻滚无敌帧与 GP/见切。
+- **全局冻结（Full Freeze）**：瞬时零延迟定格整个游戏，屏幕顶部居中与四角显示显眼冻结提示（即使关闭 `[U]` 视图也始终可见），冻结期间可自由调整面板筛选与观察细节。
+- **世界冻结（World Freeze）**：仅暂停怪物、弹道/吐息特效、随从与机关，玩家与武器照常自由行动，重置/切换任务或返回据点时自动解除冻结，便于安全测试招式判定、打点、翻滚无敌帧与 GP/见切。
 - **单次判定框常驻（Keep Hitboxes Active）**：世界冻结下保持火球、吐息、单次近战/投技等判定框在命中或防御后不消失，可反复练习翻滚、见切与 GP。
 - **逐帧步进（+1 Frame）**：在全局冻结或世界冻结下精确推进 1 帧。
 
@@ -221,8 +221,8 @@ All modes preserve the in-game player UI and normal map interactions:
 - **Pure 3D / Canvas Mode**: Supports hiding player and VFX (`HIDE PL/VFX`), hiding all 3D models for a pure black collision canvas (`HIDE ALL 3D`), and `DIM 45%` which gently dims only the 3D background while keeping the UI at full brightness.
 
 #### 4. Zero-Delay Freeze, World Freeze & Single-Frame Stepping
-- **Full Freeze**: Instantly freezes the entire game with zero delay; you can still adjust panel filters and inspect details while frozen.
-- **World Freeze**: Pauses only monsters, projectiles/breath effects, companions, and gimmicks while the player and weapon move freely—ideal for testing attack hitboxes, spacing, roll i-frames, Guard Points, and Foresight/counters.
+- **Full Freeze**: Instantly freezes the entire game with zero delay, displaying a prominent top-center banner and corner brackets (always visible even when `[U]` visualization is OFF); you can still adjust panel filters and inspect details while frozen.
+- **World Freeze**: Pauses only monsters, projectiles/breath effects, companions, and gimmicks while the player and weapon move freely, and automatically unfreezes on quest reset, stage transitions, or returning to Hub—ideal for safely testing attack hitboxes, spacing, roll i-frames, Guard Points, and Foresight/counters.
 - **Keep Hitboxes Active**: Keeps single-trigger hitboxes (fireballs, breaths, single-hit swings/grabs) from disappearing after hitting or being guarded during World Freeze, allowing repeated dodge, counter, and GP practice.
 - **Single-Frame Step (+1 Frame)**: Advances exactly 1 frame while in Full Freeze or World Freeze.
 

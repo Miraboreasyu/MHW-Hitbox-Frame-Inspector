@@ -1535,12 +1535,15 @@ void RenderD3D11(std::uintptr_t exeBase,
                     const UINT p2End = (stats.sceneDepthEndVert >= p1End && stats.sceneDepthEndVert <= totalVerts)
                                            ? stats.sceneDepthEndVert
                                            : p1End;
-                    const UINT p3End = (stats.worldOverlayEndVert >= p2End && stats.worldOverlayEndVert <= totalVerts)
-                                           ? stats.worldOverlayEndVert
-                                           : p2End;
-                    const bool useOpaqueDsv       = (p1End >= 3U);
-                    const bool useSceneComposite  = (p3End >= 3U) &&
-                                                    g_d3d11.ensureSceneResources(dev, td.Width, td.Height, useOpaqueDsv);
+                    const UINT p3End  = (stats.worldOverlayEndVert >= p2End && stats.worldOverlayEndVert <= totalVerts)
+                                            ? stats.worldOverlayEndVert
+                                            : p2End;
+                    const UINT p3bEnd = (stats.preUiLabelEndVert >= p3End && stats.preUiLabelEndVert <= totalVerts)
+                                            ? stats.preUiLabelEndVert
+                                            : p3End;
+                    const bool useOpaqueDsv      = (p1End >= 3U);
+                    const bool useSceneComposite = (p3bEnd >= 3U) &&
+                                                   g_d3d11.ensureSceneResources(dev, td.Width, td.Height, useOpaqueDsv);
 
                     if (useSceneComposite) {
                         EngineSceneTextures engTex{};
@@ -1599,7 +1602,7 @@ void RenderD3D11(std::uintptr_t exeBase,
                                 ctx->Draw(p2End - p1End, p1End);
                             }
 
-                            // Pass 3: Entity 3D Hitboxes/Hurtboxes (occluded behind foreground Opaque .SBC walls)
+                            // Pass 3a: Entity 3D Hitboxes/Hurtboxes (occluded behind foreground Opaque .SBC walls)
                             if (p3End > p2End) {
                                 ctx->PSSetShader(g_d3d11.ps, nullptr, 0);
                                 ctx->Draw(p3End - p2End, p2End);
@@ -1607,6 +1610,12 @@ void RenderD3D11(std::uintptr_t exeBase,
 
                             ctx->OMSetRenderTargets(1, &rtv, nullptr);
                             ctx->OMSetDepthStencilState(g_d3d11.depth, 0);
+
+                            // Pass 3b: Floating 3D Monster Part Labels (Depth OFF so Opaque .SBC never clips badges, pre-UI!)
+                            if (p3bEnd > p3End) {
+                                ctx->PSSetShader(g_d3d11.ps, nullptr, 0);
+                                ctx->Draw(p3bEnd - p3End, p3End);
+                            }
                         } else {
                             ctx->OMSetRenderTargets(1, &rtv, nullptr);
                             ctx->OMSetBlendState(g_d3d11.blend, bf, 0xFFFFFFFFU);
@@ -1618,14 +1627,14 @@ void RenderD3D11(std::uintptr_t exeBase,
                                 ctx->Draw(p2End, 0);
                             }
 
-                            // Pass 3: Entity 3D Hitboxes/Hurtboxes
-                            if (p3End > p2End) {
+                            // Pass 3a + 3b: Entity 3D Hitboxes/Hurtboxes + Floating 3D Monster Part Labels
+                            if (p3bEnd > p2End) {
                                 ctx->PSSetShader(g_d3d11.ps, nullptr, 0);
-                                ctx->Draw(p3End - p2End, p2End);
+                                ctx->Draw(p3bEnd - p2End, p2End);
                             }
                         }
 
-                        // Pass 4: Restore 2D Player UI (uGUI / uMhGUI) on top of ALL 3D overlays!
+                        // Pass 4: Restore 2D Player UI (uGUI / uMhGUI) on top of ALL 3D overlays & part labels!
                         if (canRestoreUi) {
                             ctx->IASetInputLayout(nullptr);
                             ctx->VSSetShader(g_d3d11.vsFullscreen, nullptr, 0);
@@ -1640,9 +1649,9 @@ void RenderD3D11(std::uintptr_t exeBase,
                         ctx->PSSetShaderResources(0, 5, nullSrvs);
 
                         // Pass 5: Plugin 2D HUD Banner & [P] Filter Panel (Always Crisp on Top)
-                        if (totalVerts > p3End) {
+                        if (totalVerts > p3bEnd) {
                             ctx->PSSetShader(g_d3d11.ps, nullptr, 0);
-                            ctx->Draw(totalVerts - p3End, p3End);
+                            ctx->Draw(totalVerts - p3bEnd, p3bEnd);
                         }
 
                         ctx->PSSetSamplers(0, 1, &oldPsSamp);
@@ -1750,11 +1759,14 @@ void RenderD3D12(std::uintptr_t exeBase,
         const UINT p2End = (stats.sceneDepthEndVert >= p1End && stats.sceneDepthEndVert <= totalVerts)
                                ? stats.sceneDepthEndVert
                                : p1End;
-        const UINT p3End = (stats.worldOverlayEndVert >= p2End && stats.worldOverlayEndVert <= totalVerts)
-                               ? stats.worldOverlayEndVert
-                               : p2End;
+        const UINT p3End  = (stats.worldOverlayEndVert >= p2End && stats.worldOverlayEndVert <= totalVerts)
+                                ? stats.worldOverlayEndVert
+                                : p2End;
+        const UINT p3bEnd = (stats.preUiLabelEndVert >= p3End && stats.preUiLabelEndVert <= totalVerts)
+                                ? stats.preUiLabelEndVert
+                                : p3End;
         const bool useOpaqueDsv      = (p1End >= 3U);
-        const bool useSceneComposite = (p3End >= 3U) &&
+        const bool useSceneComposite = (p3bEnd >= 3U) &&
                                        g_d3d12.ensureSceneResources(dev, rtvFmt, bbDesc.Width, bbDesc.Height, useOpaqueDsv);
 
         EngineSceneTextures engTex{};
@@ -1941,14 +1953,20 @@ void RenderD3D12(std::uintptr_t exeBase,
                         g_d3d12.cmdList->DrawInstanced(p2End - p1End, 1, p1End, 0);
                     }
 
-                    // Pass 3: Entity 3D Hitboxes/Hurtboxes occluded behind Opaque .SBC walls (psoOverlayDepthRead)
+                    // Pass 3a: Entity 3D Hitboxes/Hurtboxes occluded behind Opaque .SBC walls (psoOverlayDepthRead)
                     if (p3End > p2End) {
                         setPso(g_d3d12.psoOverlayDepthRead);
                         g_d3d12.cmdList->DrawInstanced(p3End - p2End, 1, p2End, 0);
                     }
 
-                    // Unbind DSV before Depth-Off UI Restore & Plugin 2D HUD PSOs!
+                    // Unbind DSV before Depth-Off Monster Part Labels, UI Restore & Plugin 2D HUD PSOs!
                     g_d3d12.cmdList->OMSetRenderTargets(1, &rtvHandle, FALSE, nullptr);
+
+                    // Pass 3b: Floating 3D Monster Part Labels (Depth OFF so Opaque .SBC never clips badges, pre-UI!)
+                    if (p3bEnd > p3End) {
+                        setPso(g_d3d12.pso);
+                        g_d3d12.cmdList->DrawInstanced(p3bEnd - p3End, 1, p3End, 0);
+                    }
                 } else {
                     g_d3d12.cmdList->OMSetRenderTargets(1, &rtvHandle, FALSE, nullptr);
 
@@ -1958,23 +1976,23 @@ void RenderD3D12(std::uintptr_t exeBase,
                         g_d3d12.cmdList->DrawInstanced(p2End, 1, 0, 0);
                     }
 
-                    // Pass 3: Entity 3D Hitboxes/Hurtboxes
-                    if (p3End > p2End) {
+                    // Pass 3a + 3b: Entity 3D Hitboxes/Hurtboxes + Floating 3D Monster Part Labels
+                    if (p3bEnd > p2End) {
                         setPso(g_d3d12.pso);
-                        g_d3d12.cmdList->DrawInstanced(p3End - p2End, 1, p2End, 0);
+                        g_d3d12.cmdList->DrawInstanced(p3bEnd - p2End, 1, p2End, 0);
                     }
                 }
 
-                // Pass 4: Restore 2D Player UI (uGUI / uMhGUI) on top of ALL 3D overlays!
+                // Pass 4: Restore 2D Player UI (uGUI / uMhGUI) on top of ALL 3D overlays & part labels!
                 if (canRestoreUi) {
                     setPso(g_d3d12.psoRestoreUi);
                     g_d3d12.cmdList->DrawInstanced(3, 1, 0, 0);
                 }
 
                 // Pass 5: Plugin 2D HUD Banner & [P] Filter Panel
-                if (totalVerts > p3End) {
+                if (totalVerts > p3bEnd) {
                     setPso(g_d3d12.pso);
-                    g_d3d12.cmdList->DrawInstanced(totalVerts - p3End, 1, p3End, 0);
+                    g_d3d12.cmdList->DrawInstanced(totalVerts - p3bEnd, 1, p3bEnd, 0);
                 }
             } else {
                 g_d3d12.cmdList->OMSetRenderTargets(1, &rtvHandle, FALSE, nullptr);
