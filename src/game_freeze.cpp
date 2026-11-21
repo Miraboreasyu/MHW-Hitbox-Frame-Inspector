@@ -496,28 +496,32 @@ void ProcessFrozenObjCollision(std::uintptr_t exeBase, std::uintptr_t comp, bool
             }
         }
 
-        // 1b. Clear already-hit target handle list (+0x760, count at +0x828) using native cUnitHandle::set
+        // 1b. comp + 0x760 (count at +0x828) is cpObjCollision's ignore-unit blocklist (e.g. a uShellEm
+        //     stores its own caster Monster here so fireballs/explosions never damage their own owner!).
+        //     NEVER wipe non-player / frozen handles from +0x760 — only clear mainPlayer if ever added.
+        const std::uintptr_t mainPl = g_cachedMainPlayer.load(std::memory_order_relaxed);
         const std::uint64_t hitUnitCnt = *reinterpret_cast<const std::uint64_t*>(comp + mhw::kOffObjCollHitUnitCount);
-        if (hitUnitCnt > 0 && hitUnitCnt <= 8) {
-            LPCRITICAL_SECTION cs = fnGetCritSec();
-            if (cs) {
-                for (std::uint64_t i = 0; i < hitUnitCnt; ++i) {
-                    const std::uintptr_t hAddr = comp + mhw::kOffObjCollHitUnits + 0x08 + i * 0x18;
-                    if (*reinterpret_cast<const std::uintptr_t*>(hAddr) != 0) {
-                        fnHandleSet(cs, 0, hAddr);
-                    }
+        if (mainPl != 0 && hitUnitCnt > 0 && hitUnitCnt <= 8) {
+            LPCRITICAL_SECTION cs = nullptr;
+            for (std::uint64_t i = 0; i < hitUnitCnt; ++i) {
+                const std::uintptr_t hAddr = comp + mhw::kOffObjCollHitUnits + 0x08 + i * 0x18;
+                if (*reinterpret_cast<const std::uintptr_t*>(hAddr) == mainPl) {
+                    if (!cs) cs = fnGetCritSec();
+                    if (cs) fnHandleSet(cs, 0, hAddr);
                 }
-                *reinterpret_cast<volatile std::uint64_t*>(comp + mhw::kOffObjCollHitUnitCount) = 0;
             }
         }
 
-        // 1c. Clear 16-slot per-target hit-count cap table (+0x5400)
-        for (std::size_t s = 0; s < 16; ++s) {
-            const std::uintptr_t slot = comp + mhw::kOffObjCollHitHist + s * 0x20;
-            if (*reinterpret_cast<const std::uintptr_t*>(slot) != 0) {
-                *reinterpret_cast<volatile std::uintptr_t*>(slot + 0x00) = 0;
-                *reinterpret_cast<volatile std::uintptr_t*>(slot + 0x08) = 0;
-                *reinterpret_cast<volatile std::int32_t*>(slot + 0x10)   = 0;
+        // 1c. Clear ONLY mainPlayer entries in the 16-slot per-target hit-count cap table (+0x5400)
+        //     (slot layout verified via FUN_1412d4e80: +0x00=atkNode, +0x08=defUnit, +0x10=hitCount).
+        if (mainPl != 0) {
+            for (std::size_t s = 0; s < 16; ++s) {
+                const std::uintptr_t slot = comp + mhw::kOffObjCollHitHist + s * 0x20;
+                if (*reinterpret_cast<const std::uintptr_t*>(slot + 0x08) == mainPl) {
+                    *reinterpret_cast<volatile std::uintptr_t*>(slot + 0x00) = 0;
+                    *reinterpret_cast<volatile std::uintptr_t*>(slot + 0x08) = 0;
+                    *reinterpret_cast<volatile std::int32_t*>(slot + 0x10)   = 0;
+                }
             }
         }
     }
@@ -753,6 +757,11 @@ bool TryDeliverDefenderOnlyHitSEH(std::uintptr_t exeBase,
         const std::uintptr_t defUnit = *reinterpret_cast<const std::uintptr_t*>(hitInfo + mhw::kOffHitInfoDefUnit);
         if (!IsAlignedPtr(defUnit)) return true;
         if ((*reinterpret_cast<const std::uint8_t*>(defUnit + mhw::kOffUnitAliveFlags) & 0x0EU) == 0) return true;
+        // Never allow a frozen attacker (Monster / uShellEm / uMhEfc) to damage itself or any other
+        // frozen unit (Monster / Palico / Gimmick) during World Freeze — deliver only to unfrozen defenders (Player).
+        if (defUnit == atkUnit || ShouldFreezeUnitSEH(exeBase, exeEnd, defUnit, false)) {
+            return true;
+        }
 
         bool deliver = false;
         if ((defAttr & 0x08U) != 0) {
@@ -806,6 +815,9 @@ bool TryDeliverDefenderOnlyGuardSEH(std::uintptr_t exeBase,
 
         const std::uintptr_t defUnit = *reinterpret_cast<const std::uintptr_t*>(hitInfo + mhw::kOffHitInfoDefUnit);
         if (!IsAlignedPtr(defUnit)) return true;
+        if (defUnit == atkUnit || ShouldFreezeUnitSEH(exeBase, exeEnd, defUnit, false)) {
+            return true;
+        }
 
         struct alignas(8) DefGuardedEvent {
             std::uintptr_t vft;
