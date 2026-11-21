@@ -74,6 +74,7 @@
 | **`O`** | 单帧步进 +1 帧（在 `I` 或 `K` 冻结状态下生效） |
 | **`P`** | 打开 / 关闭左上角交互式筛选与场景面板 |
 | **`Shift + P`** | 不打开面板直接循环切换预设范围 |
+| **`\`** | 显示 / 隐藏插件 2D Overlay（顶部状态条、冻结横幅、四角框线并关闭面板），便于纯净截图 |
 
 > - 打开游戏内聊天框、搜索框或起名输入文字时，插件会自动暂停拦截全部热键。
 > - 插件启用期间默认屏蔽游戏原生 `O / K / L / ;` 键盘转视角键（打字时自动放行），避免按 `K` / `O` 时误转镜头；可在 `mhw_hfi.ini` 中将 `BlockCameraKeys` 设为 `0` 恢复。
@@ -134,7 +135,7 @@
 
 #### 5. 游戏内聊天 / 快捷轮盘定型文触发
 
-仅支持触发 6 个核心主热键，采用**完整字符串精确匹配**（可在游戏内直接打字发送，或填入自定义定型文并绑到快捷轮盘）：
+仅支持触发 7 个核心主热键，采用**完整字符串精确匹配**（可在游戏内直接打字发送，或填入自定义定型文并绑到快捷轮盘）：
 
 | 对应主热键 | 功能 | 默认触发字符串 | `.ini` 配置项 |
 |---|---|---|---|
@@ -144,6 +145,7 @@
 | **`O`** | 单帧步进 +1 帧 | `$step_frame` | `ChatCmdStep` |
 | **`J`** | 开关单次判定框常驻 | `$keep_hitbox` | `ChatCmdKeepHitbox` |
 | **`P`** | 打开 / 关闭筛选面板 | `$show_panel` | `ChatCmdPanel` |
+| **`\`** | 显示 / 隐藏插件 2D Overlay（纯净截图） | `$show_overlay` | `ChatCmdOverlay` |
 
 - **默认不区分英文大小写**（`ChatCaseSensitive=0`），可在 `mhw_hfi.ini` 中改为 `1` 开启严格区分大小写。
 - **自定义与热刷新**：游戏运行期间随时编辑并保存 `nativePC\plugins\mhw_hfi.ini`（中文/日文定型文请保存为 UTF-8 编码），下一次发聊天/定型文或打开面板时即时生效，无需重启游戏。将任意一项留空或填 `NONE` 可单独禁用该命令。
@@ -157,14 +159,14 @@
 | 配置项 | 默认值 | 说明 |
 |---|---|---|
 | `Enabled` | `1` | 插件总开关（`1` 启用 / `0` 禁用） |
-| `KeyToggleVis` / `KeyToggleFreeze` / `KeyFreezeOthers` / `KeyPersistHitbox` / `KeyStepFrame` / `KeyCycleFilter` | `U` / `I` / `K` / `J` / `O` / `P` | 自定义 6 个主热键（支持字母、数字、`F1`~`F24`、`NUMPAD0`~`9` 等） |
+| `KeyToggleVis` / `KeyToggleFreeze` / `KeyFreezeOthers` / `KeyPersistHitbox` / `KeyStepFrame` / `KeyCycleFilter` / `KeyToggleOverlay` | `U` / `I` / `K` / `J` / `O` / `P` / `\` | 自定义 7 个主热键（支持字母、数字、`F1`~`F24`、`NUMPAD0`~`9`、`\` 等） |
 | `StartVisOn` | `0` | 启动游戏后默认是否自动开启视图 |
 | `KeepHitboxesActive` | `1` | 世界冻结下默认开启单次判定框常驻 |
 | `BlockCameraKeys` | `1` | 屏蔽游戏 `O / K / L / ;` 转视角键 |
 | `ShowHudBanner` | `1` | 显示左上角状态提示条 |
 | `ChatCommands` | `1` | 开关聊天/定型文触发（支持热刷新） |
 | `ChatCaseSensitive` | `0` | 聊天命令是否区分英文大小写（支持热刷新） |
-| `ChatCmdVis` / `ChatCmdFreeze` / `ChatCmdWorldFreeze` / `ChatCmdStep` / `ChatCmdKeepHitbox` / `ChatCmdPanel` | `$draw_hitbox` / `$full_freeze` / `$ThE_WoRLD!!!` / `$step_frame` / `$keep_hitbox` / `$show_panel` | 自定义 6 个聊天/定型文触发词（UTF-8，支持热刷新） |
+| `ChatCmdVis` / `ChatCmdFreeze` / `ChatCmdWorldFreeze` / `ChatCmdStep` / `ChatCmdKeepHitbox` / `ChatCmdPanel` / `ChatCmdOverlay` | `$draw_hitbox` / `$full_freeze` / `$ThE_WoRLD!!!` / `$step_frame` / `$keep_hitbox` / `$show_panel` / `$show_overlay` | 自定义 7 个聊天/定型文触发词（UTF-8，支持热刷新） |
 | `GamepadPanel` | `1` | 开关 `[P]` 面板手柄操控（支持热刷新） |
 | `LineThickness` / `EntityLineScale` / `SbcLineScale` | `2.0` / `1.0` / `1.0` | 基础线宽与实体/地形线宽倍率 |
 | `OpacityScale` / `SbcSurfaceOpacity` / `HdrNits` | `1.0` / `1.0` / `0` | 全局透明度、地形半透明面透明度、HDR 亮度（`0` 为自动） |
@@ -245,6 +247,7 @@ All modes preserve the in-game player UI and normal map interactions:
 | **`O`** | Step +1 frame (active while frozen by `I` or `K`) |
 | **`P`** | Open / close the top-left interactive Filter & Scene Panel |
 | **`Shift + P`** | Cycle scope presets directly without opening the panel |
+| **`\`** | Show / hide plugin 2D Overlay (top HUD banner, freeze banner, corner brackets & closes panel) for clean screenshots |
 
 > - All mod hotkeys automatically pause while typing in in-game chat, search, or naming boxes.
 > - While the mod is active, native keyboard camera rotation keys `O / K / L / ;` are blocked by default (passed through automatically when typing) so pressing `K` or `O` never nudges the camera; set `BlockCameraKeys=0` in `mhw_hfi.ini` to restore them.
@@ -305,7 +308,7 @@ When the `[P]` panel is open, you can control it directly with a controller (key
 
 #### 5. In-Game Chat / Radial Shoutout Triggers
 
-Supports triggering ONLY the 6 core main hotkeys via **exact full-string match** (works by typing directly in in-game chat or binding custom shoutouts to the Radial Menu):
+Supports triggering ONLY the 7 core main hotkeys via **exact full-string match** (works by typing directly in in-game chat or binding custom shoutouts to the Radial Menu):
 
 | Main Hotkey | Action | Default Trigger String | `.ini` Key |
 |---|---|---|---|
@@ -315,6 +318,7 @@ Supports triggering ONLY the 6 core main hotkeys via **exact full-string match**
 | **`O`** | Step +1 frame | `$step_frame` | `ChatCmdStep` |
 | **`J`** | Toggle Keep Single-Trigger Hitboxes Active | `$keep_hitbox` | `ChatCmdKeepHitbox` |
 | **`P`** | Open / close filter panel | `$show_panel` | `ChatCmdPanel` |
+| **`\`** | Show / hide plugin 2D Overlay (clean screenshots) | `$show_overlay` | `ChatCmdOverlay` |
 
 - **Case-insensitive for ASCII letters by default** (`ChatCaseSensitive=0`); change to `1` in `mhw_hfi.ini` to require strict case-sensitive matching.
 - **Customization & Hot-Reload**: Edit and save `nativePC\plugins\mhw_hfi.ini` at any time while the game is running (save as UTF-8 when using Chinese/Japanese shoutouts). Changes take effect on the very next chat/shoutout or panel open without restarting the game. Leave any entry empty or set it to `NONE` to disable that individual command.
@@ -328,14 +332,14 @@ A default `mhw_hfi.ini` containing all default values is included in the archive
 | Option | Default | Description |
 |---|---|---|
 | `Enabled` | `1` | Master plugin toggle (`1` enabled / `0` disabled) |
-| `KeyToggleVis` / `KeyToggleFreeze` / `KeyFreezeOthers` / `KeyPersistHitbox` / `KeyStepFrame` / `KeyCycleFilter` | `U` / `I` / `K` / `J` / `O` / `P` | Customize the 6 main hotkeys (supports letters, digits, `F1`–`F24`, `NUMPAD0`–`9`, etc.) |
+| `KeyToggleVis` / `KeyToggleFreeze` / `KeyFreezeOthers` / `KeyPersistHitbox` / `KeyStepFrame` / `KeyCycleFilter` / `KeyToggleOverlay` | `U` / `I` / `K` / `J` / `O` / `P` / `\` | Customize the 7 main hotkeys (supports letters, digits, `F1`–`F24`, `NUMPAD0`–`9`, `\`, etc.) |
 | `StartVisOn` | `0` | Whether visualization starts ON automatically at game launch |
 | `KeepHitboxesActive` | `1` | Keep single-trigger hitboxes active by default during World Freeze |
 | `BlockCameraKeys` | `1` | Block in-game `O / K / L / ;` camera rotation keys |
 | `ShowHudBanner` | `1` | Show top-left HUD status banner |
 | `ChatCommands` | `1` | Enable/disable chat & shoutout triggers (hot-reloadable) |
 | `ChatCaseSensitive` | `0` | Whether chat commands are ASCII case-sensitive (hot-reloadable) |
-| `ChatCmdVis` / `ChatCmdFreeze` / `ChatCmdWorldFreeze` / `ChatCmdStep` / `ChatCmdKeepHitbox` / `ChatCmdPanel` | `$draw_hitbox` / `$full_freeze` / `$ThE_WoRLD!!!` / `$step_frame` / `$keep_hitbox` / `$show_panel` | Customize the 6 chat/shoutout trigger strings (UTF-8, hot-reloadable) |
+| `ChatCmdVis` / `ChatCmdFreeze` / `ChatCmdWorldFreeze` / `ChatCmdStep` / `ChatCmdKeepHitbox` / `ChatCmdPanel` / `ChatCmdOverlay` | `$draw_hitbox` / `$full_freeze` / `$ThE_WoRLD!!!` / `$step_frame` / `$keep_hitbox` / `$show_panel` / `$show_overlay` | Customize the 7 chat/shoutout trigger strings (UTF-8, hot-reloadable) |
 | `GamepadPanel` | `1` | Enable/disable controller navigation for the `[P]` panel (hot-reloadable) |
 | `LineThickness` / `EntityLineScale` / `SbcLineScale` | `2.0` / `1.0` / `1.0` | Base line thickness and entity/terrain line width multipliers |
 | `OpacityScale` / `SbcSurfaceOpacity` / `HdrNits` | `1.0` / `1.0` / `0` | Global opacity, semi-transparent terrain surface opacity, and HDR luminance (`0` = auto) |

@@ -151,6 +151,7 @@ struct ViewFilterState {
     int               emTargetScope   = 0; // 0=Auto(Solo), 1=Auto(+Others), 2..9=Lock #1..#8(Solo)
     std::uint32_t     emPartMask      = 0xFFFFFFFFu;
     bool              hideMonster     = false;
+    bool              showOverlay     = true;  // [\] / $show_overlay: Toggle 2D HUD banner, freeze pill & brackets
     bool              panelOpen       = false;
     int               panelPage       = 0; // 0=Main Filter & Scene, 1=Monster Parts Inspector
     int               panelCursor     = 0; // 0..17 (Page 0)
@@ -166,6 +167,7 @@ struct ChatCommandConfig {
     std::string cmdStep        = "$step_frame";    // O: Step +1 frame
     std::string cmdKeepHitbox  = "$keep_hitbox";   // J: Keep single-trigger hitboxes active
     std::string cmdPanel       = "$show_panel";    // P: Open / close Filter & Scene Panel
+    std::string cmdOverlay     = "$show_overlay";  // \: Show / hide 2D HUD overlay & freeze banner
 };
 
 struct Config {
@@ -176,6 +178,7 @@ struct Config {
     int vkPersistHitbox     = 'J';   // 0x4A: Toggle keeping single-trigger hitboxes active while frozen
     int vkStepFrame         = 'O';   // 0x4F: Advance 1 frame while frozen (Full or World Freeze)
     int vkCycleFilter       = 'P';   // 0x50: Open/close interactive Filter & Scene Panel (Shift+P cycles preset)
+    int vkToggleOverlay     = 0xDC;  // VK_OEM_5 ('\'): Show/hide 2D HUD overlay for clean screenshots
 
     bool startVisOn         = false; // Whether hitbox display starts ON automatically
     bool keepHitboxesActive = true;  // Keep single-trigger frozen hitboxes active & repeatable in World Freeze

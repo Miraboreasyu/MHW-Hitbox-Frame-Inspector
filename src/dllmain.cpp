@@ -55,13 +55,14 @@ struct RawXInputState {
 using XInputGetStateFn = DWORD(WINAPI*)(DWORD, RawXInputState*);
 
 enum KeyActionBit : std::uint8_t {
-    kKeyVis         = 0x01,
-    kKeyFreeze      = 0x02,
-    kKeyWorldFreeze = 0x04,
-    kKeyKeepHitbox  = 0x08,
-    kKeyStep        = 0x10,
-    kKeyFilter      = 0x20,
-    kKeyQuickPreset = 0x40
+    kKeyVis           = 0x01,
+    kKeyFreeze        = 0x02,
+    kKeyWorldFreeze   = 0x04,
+    kKeyKeepHitbox    = 0x08,
+    kKeyStep          = 0x10,
+    kKeyFilter        = 0x20,
+    kKeyQuickPreset   = 0x40,
+    kKeyToggleOverlay = 0x80
 };
 
 enum PresentWorkBit : std::uint8_t {
@@ -144,7 +145,7 @@ app::ChatCommandConfig     g_liveChatCfg{};
 std::atomic<bool>          g_gamepadPanelEnabled{true};
 
 std::uint8_t               g_vkToAction[256]{};
-int                        g_actionVks[6]{};
+int                        g_actionVks[7]{};
 std::atomic<std::uint8_t>  g_presentWorkMask{0};
 std::atomic<std::uint8_t>  g_edgeKeyMask{0};
 std::atomic<std::uint8_t>  g_heldKeyMask{0};
@@ -166,6 +167,7 @@ void BuildHotkeyTable() noexcept {
     bind(3, g_cfg.vkPersistHitbox, kKeyKeepHitbox);
     bind(4, g_cfg.vkStepFrame,     kKeyStep);
     bind(5, g_cfg.vkCycleFilter,   kKeyFilter);
+    bind(6, g_cfg.vkToggleOverlay, kKeyToggleOverlay);
 }
 
 std::uint32_t MapVkToPanelCmd(WPARAM vk) noexcept {
@@ -372,6 +374,11 @@ bool MatchChatCommandHot(const char* msg, std::uint8_t& outActionBit, const char
     if (ExactChatStringEquals(msg, g_liveChatCfg.cmdPanel, cs)) {
         outActionBit  = kKeyFilter;
         outActionName = "P (Panel)";
+        return true;
+    }
+    if (ExactChatStringEquals(msg, g_liveChatCfg.cmdOverlay, cs)) {
+        outActionBit  = kKeyToggleOverlay;
+        outActionName = "\\ (Overlay)";
         return true;
     }
     return false;
@@ -633,10 +640,10 @@ void PollFallbackIfHookUnavailable(HWND gameHwnd) noexcept {
     }
     const std::uint8_t prevHeld = g_heldKeyMask.load(std::memory_order_relaxed);
     std::uint8_t nowHeld = 0;
-    static constexpr std::uint8_t kBits[6] = {
-        kKeyVis, kKeyFreeze, kKeyWorldFreeze, kKeyKeepHitbox, kKeyStep, kKeyFilter
+    static constexpr std::uint8_t kBits[7] = {
+        kKeyVis, kKeyFreeze, kKeyWorldFreeze, kKeyKeepHitbox, kKeyStep, kKeyFilter, kKeyToggleOverlay
     };
-    for (int i = 0; i < 6; ++i) {
+    for (int i = 0; i < 7; ++i) {
         const int vk = g_actionVks[i];
         if (vk > 0 && vk < 256 && (::GetAsyncKeyState(vk) & 0x8000) != 0) {
             nowHeld |= kBits[i];
@@ -1063,10 +1070,10 @@ __declspec(noinline) void ProcessPresentWork(std::uintptr_t d3dRender) {
         if (++g_heldWatchdog >= 16) {
             g_heldWatchdog = 0;
             std::uint8_t verified = 0;
-            static constexpr std::uint8_t kBits[6] = {
-                kKeyVis, kKeyFreeze, kKeyWorldFreeze, kKeyKeepHitbox, kKeyStep, kKeyFilter
+            static constexpr std::uint8_t kBits[7] = {
+                kKeyVis, kKeyFreeze, kKeyWorldFreeze, kKeyKeepHitbox, kKeyStep, kKeyFilter, kKeyToggleOverlay
             };
-            for (int i = 0; i < 6; ++i) {
+            for (int i = 0; i < 7; ++i) {
                 const int vk = g_actionVks[i];
                 if ((held & kBits[i]) != 0 && vk > 0 && vk < 256 && (::GetAsyncKeyState(vk) & 0x8000) != 0) {
                     verified |= kBits[i];
@@ -1137,6 +1144,15 @@ __declspec(noinline) void ProcessPresentWork(std::uintptr_t d3dRender) {
                      app::MatchPresetName(g_viewState.visMask), g_viewState.visMask);
         }
 
+        if ((edges & kKeyToggleOverlay) != 0) {
+            g_viewState.showOverlay = !g_viewState.showOverlay;
+            if (!g_viewState.showOverlay && g_viewState.panelOpen) {
+                g_viewState.panelOpen = false;
+                g_panelOpenAtomic.store(false, std::memory_order_release);
+            }
+            app::Log("hotkey: HUD Overlay %s", g_viewState.showOverlay ? "SHOWN" : "HIDDEN (clean screenshot mode)");
+        }
+
         if (panelCmd != 0 && g_viewState.panelOpen) {
             ApplyPanelCommands(panelCmd);
         }
@@ -1180,7 +1196,9 @@ __declspec(noinline) void ProcessPresentWork(std::uintptr_t d3dRender) {
         }
     }
 
-    if (vis || g_viewState.panelOpen || freezeMode != freeze::Mode::None || showStartupToast) {
+    const bool needOverlayDraw = g_viewState.showOverlay &&
+                                 (freezeMode != freeze::Mode::None || showStartupToast);
+    if (vis || g_viewState.panelOpen || needOverlayDraw) {
         render::OnPresent(g_exeBase,
                           d3dRender,
                           vis,
@@ -1350,6 +1368,7 @@ bool TryInstallHooks(HMODULE exe) {
     g_viewState.entityLineIdx = g_cfg.defaultEntityLineIdx;
     g_viewState.sbcLineIdx    = g_cfg.defaultSbcLineIdx;
     g_viewState.hideMonster   = g_cfg.startHideMonster;
+    g_viewState.showOverlay   = g_cfg.showHudBanner;
     g_viewState.stageHide    = g_cfg.startStageHide;
     g_viewState.backdrop     = g_cfg.startBackdrop;
     g_viewState.depthMode    = g_cfg.startDepthMode;

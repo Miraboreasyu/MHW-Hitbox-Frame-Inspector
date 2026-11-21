@@ -5876,7 +5876,7 @@ void BuildOverlayFrame(std::uintptr_t exeBase,
     float leftBarRight  = x0;
     float leftBarBottom = y0;
 
-    if (cfg.showHudBanner && (visEnabled || anyFreeze || viewState.panelOpen || anySceneMod || showStartupToast)) {
+    if (viewState.showOverlay && (visEnabled || anyFreeze || viewState.panelOpen || anySceneMod || showStartupToast)) {
         char linePrefix[260]{};
         char freezeSeg[40]{};
         char tailSeg[16]{};
@@ -5884,7 +5884,7 @@ void BuildOverlayFrame(std::uintptr_t exeBase,
 
         if (!visEnabled && !anyFreeze && !viewState.panelOpen && !anySceneMod && showStartupToast) {
             std::snprintf(linePrefix, sizeof(linePrefix),
-                          "MHW HFI READY  |  [U] VIS  [I] FREEZE  [K] WORLD  [J] KEEP  [O] +1F  [P] PANEL");
+                          "MHW HFI READY  |  [U] VIS  [I] FREEZE  [K] WORLD  [J] KEEP  [O] +1F  [P] PANEL  [\\] HUD");
         } else {
             char mapSeg[48]{};
             if ((viewState.visMask & (app::kCatEnvObject | app::kCatStageMesh)) != 0) {
