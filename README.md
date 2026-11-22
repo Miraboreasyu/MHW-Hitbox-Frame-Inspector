@@ -50,7 +50,7 @@
 - **纯碰撞 3D / 画布模式**：支持隐藏玩家与特效（`HIDE PL/VFX`）、全 3D 模型隐藏获得纯黑底碰撞画布（`HIDE ALL 3D`），以及仅柔暗 3D 背景而保持 UI 满亮度的 `DIM 45%`。
 
 #### 4. 零延迟冻结、世界冻结与单帧步进
-- **全局冻结（Full Freeze）**：瞬时零延迟定格整个游戏，屏幕顶部居中与四角显示显眼冻结提示（即使关闭 `[U]` 视图也始终可见），冻结期间可自由调整面板筛选与观察细节。
+- **全局冻结（Full Freeze）**：瞬时零延迟定格整个游戏，屏幕顶部居中与四角显示显眼冻结提示（即使关闭 `[U]` 视图也始终可见）；冻结期间同步推进 TAA 相机重投影并临时抑制动态模糊，外接自由相机运镜依旧清晰无拖影，且可自由调整面板筛选与观察细节。
 - **世界冻结（World Freeze）**：仅暂停怪物、弹道/吐息特效、随从与机关，玩家与武器照常自由行动，重置/切换任务或返回据点时自动解除冻结，便于安全测试招式判定、打点、翻滚无敌帧与 GP/见切。
 - **单次判定框常驻（Keep Hitboxes Active）**：世界冻结下保持火球、吐息、单次近战/投技等判定框在命中或防御后不消失，可反复练习翻滚、见切与 GP。
 - **世界冻结延迟爆发（World Freeze Delayed Burst，默认开启）**：修复世界冻结下连续攻击导致的去重缓存（`cCache[32]`）与固定特效/伤害池溢出崩溃；冻结期间照常保留实时命中特效、武器命中音效、卡肉与运镜震动并暂存伤害数字，解除时停后按节奏错峰爆发重放伤害数字、命中特效、优先级运镜与视野冲击（FOV Punch），可通过 `[P]` 面板第 18 行或聊天命令 `$freeze_burst` 实时切换。
@@ -238,7 +238,7 @@ All modes preserve the in-game player UI and normal map interactions:
 - **Pure 3D / Canvas Mode**: Supports hiding player and VFX (`HIDE PL/VFX`), hiding all 3D models for a pure black collision canvas (`HIDE ALL 3D`), and `DIM 45%` which gently dims only the 3D background while keeping the UI at full brightness.
 
 #### 4. Zero-Delay Freeze, World Freeze & Single-Frame Stepping
-- **Full Freeze**: Instantly freezes the entire game with zero delay, displaying a prominent top-center banner and corner brackets (always visible even when `[U]` visualization is OFF); you can still adjust panel filters and inspect details while frozen.
+- **Full Freeze**: Instantly freezes the entire game with zero delay, displaying a prominent top-center banner and corner brackets (always visible even when `[U]` visualization is OFF); keeps TAA camera reprojection advancing and suppresses motion blur while frozen so external Free Camera panning stays crisp without trajectory smearing, while still allowing full panel/filter adjustments.
 - **World Freeze**: Pauses only monsters, projectiles/breath effects, companions, and gimmicks while the player and weapon move freely, and automatically unfreezes on quest reset, stage transitions, or returning to Hub—ideal for safely testing attack hitboxes, spacing, roll i-frames, Guard Points, and Foresight/counters.
 - **Keep Hitboxes Active**: Keeps single-trigger hitboxes (fireballs, breaths, single-hit swings/grabs) from disappearing after hitting or being guarded during World Freeze, allowing repeated dodge, counter, and GP practice.
 - **World Freeze Delayed Burst (ON by default)**: Fixes dedup cache (`cCache[32]`) and fixed-size VFX/damage pool overflows caused by repeated hits during World Freeze; keeps hit VFX, weapon hit sounds, hitstop, and camera shakes live during freeze while holding back damage numbers, then bursts out paced damage numbers, hit VFX, priority-ranked camera shakes, and a resume FOV punch when World Freeze ends. Toggle live via `[P]` panel row 18 or `$freeze_burst`.

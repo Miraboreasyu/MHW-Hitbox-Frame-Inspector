@@ -118,6 +118,7 @@ constexpr std::uintptr_t kRvaDtiCollNodePl         = 0x4C9A0D8;
 
 // ---- Global Singleton Pointer RVAs ----
 constexpr std::uintptr_t kRvaSMhMainInstance      = 0x51C4148; // sMhMain*
+constexpr std::uintptr_t kRvaSMhShaderInstance    = 0x51C4368; // sMhShader* (0x1422652b4 / 0x1424cafcb / 0x142393226)
 constexpr std::uintptr_t kRvaSCameraInstance      = 0x51C4400; // sCamera* (0x14229a1e0 / 0x14228e770)
 constexpr std::uintptr_t kRvaSMhRenderInstance    = 0x51C4480; // sMhRender*
 constexpr std::uintptr_t kRvaSMhUnitInstance      = 0x51238C8; // sMhUnit*
@@ -160,9 +161,14 @@ constexpr std::size_t kOffInputTextEditor       = 0x1D9E8; // cInputTextEditor*
 constexpr std::size_t kOffMhInputTextUnfocused  = 0x1DA00; // uint8_t: 0 = focused (0x140482e00), !=0 = unfocused (0x140482f80)
 constexpr std::size_t kOffInputEditorState      = 0x188;   // int32_t: 0 = none, 1 = standby, 2 = active typing
 
-// ---- uColorCorrectFilter Pre-UI 3D Dimming Offsets (0x1424f7c00 / 0x1424f9110) ----
+// ---- uColorCorrectFilter / MotionBlur Filter & sMhShader Post-Process Offsets ----
 constexpr std::size_t kOffCCFilterMatrix        = 0x470;   // float fMatrix[4][4] (16 floats, identity @ 0x143fde920)
 constexpr std::size_t kOffCCFilterBlendRate     = 0x570;   // float fBlendRate (0.0 .. 1.0)
+constexpr std::size_t kOffMBFilterShutter       = 0x168;   // float mShutterSpeed on uMotionBlurFilter (0x1424fbcd8)
+constexpr std::size_t kOffMBFilterFurShutter    = 0x16C;   // float mFurShutterSpeed on uMotionBlurFilter (0x1424fbd66)
+constexpr std::size_t kOffMBReconShutter        = 0x184;   // float mShutterSpeed on uMotionBlurReconstructionFilter (0x1424ca036)
+constexpr std::size_t kOffMBReconFurShutter     = 0x188;   // float mFurShutterSpeed on uMotionBlurReconstructionFilter (0x1424ca0c4)
+constexpr std::size_t kOffShaderMotionBlurEnable = 0xE9EC; // uint8_t effective Motion Blur enable on sMhShader (vft[+0xA0] @ 0x141b19d90)
 
 // ---- sMhRender HDR, Display Sub-Rect (16:9 / 21:9 Pillarbox/Letterbox), & Scene Target Offsets ----
 constexpr std::size_t kOffRenderD3DRender       = 0x78;    // cD3DRender* on sMhRender (0x1423c3790)
@@ -178,6 +184,7 @@ constexpr std::size_t kOffRenderSceneHeight     = 0x19C;   // int32_t active RTS
 constexpr std::size_t kOffRenderUpscaleRatio    = 0x204;   // float upscale factor on sMhRender (!= 1.0f when upscaling)
 constexpr std::size_t kOffRenderHdrOutput       = 0x21A;
 constexpr std::size_t kOffRenderHdrWhiteNits    = 0x21C;
+constexpr std::size_t kOffRenderActiveFrameCount = 0x1F210; // uint64_t active render/TAA frame counter on sMhRender (0x1422932d2, 0x1423922d3, 0x142596e20)
 constexpr std::size_t kOffRenderBackBufW        = 0x1F448; // int32_t SwapChain BackBuffer width  on sMhRender (0x14229c160 / 0x1422938b0)
 constexpr std::size_t kOffRenderBackBufH        = 0x1F44C; // int32_t SwapChain BackBuffer height on sMhRender (0x14229c160 / 0x1422938b0)
 constexpr std::size_t kOffRenderSceneMain       = 0x1F450; // cRenderScene* (main 3D + 2D uGUI scene on sMhRender)
@@ -303,6 +310,7 @@ constexpr std::size_t kOffUnitGroup            = 0x40;     // uint64_t mUnitGrou
 constexpr std::size_t kOffUnitPassMask         = 0x48;     // uint32_t mDrawPass bitmask
 constexpr std::size_t kOffUnitLastDrawnMask    = 0x50;     // uint32_t mLastDrawnPassMask (checked by uGimmick::move!)
 constexpr std::size_t kOffUnitCurDrawnMask     = 0x54;     // uint32_t mCurFrameDrawnPassMask (stamped by 0x1422290f0)
+constexpr std::size_t kOffUnitVftMove          = 0x48;     // vft[9] cUnit::move (e.g. uTemporalAAFilter*::move)
 constexpr std::uint64_t kUnitGroupPlSubModelBit = 0x0000000000020000ULL; // Group[17]: player slinger/mantle child models (0x141fe48c0)
 constexpr std::uint64_t kUnitGroupGmSubModelBit = 0x0000000100000000ULL; // Group[32]: gm025/stage gimmick child models (0x1420760c0)
 constexpr std::uint64_t kUnitGroupGimmickBit    = 0x0000004000000000ULL; // Group[38]: child uMhModel of uGimmick (0x141ced660)

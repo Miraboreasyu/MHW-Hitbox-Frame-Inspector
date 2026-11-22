@@ -20,6 +20,7 @@ using GetMainPlayerFn = std::uintptr_t(__fastcall*)(std::uintptr_t);
 using HitDispatchFn = int(__fastcall*)(std::uintptr_t, std::uintptr_t, std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t);
 using GuardDispatchFn = std::uint64_t(__fastcall*)(std::uintptr_t, std::uintptr_t);
 using UnitOnEventFn = void(__fastcall*)(std::uintptr_t, void*);
+using UnitVftMoveFn = void(__fastcall*)(std::uintptr_t);
 
 std::uintptr_t g_exeBase = 0;
 std::uintptr_t g_exeEnd  = 0;
@@ -95,6 +96,34 @@ struct CamAngles {
 };
 CamAngles g_camHistory[4]{};
 std::uint32_t g_camHistIdx = 0;
+
+// Saved Motion Blur & cached TAA filter state while Full Freeze [I] is active
+constexpr std::uint32_t kMaxSavedBlurUnits = 8;
+constexpr std::uint32_t kMaxCachedTaaUnits = 4;
+
+struct SavedBlurUnit {
+    std::uintptr_t unit;
+    std::uintptr_t vft;
+    std::uint8_t   kind; // 1 = uMotionBlurReconstructionFilter, 2 = uMotionBlurFilter
+    float          shutter;
+    float          furShutter;
+};
+
+struct CachedTaaUnit {
+    std::uintptr_t unit;
+    std::uintptr_t vft;
+};
+
+std::uintptr_t g_savedShaderPtr     = 0;
+std::uint8_t   g_savedShaderMbEnable = 0;
+bool           g_hasSavedShaderMb   = false;
+SavedBlurUnit  g_savedBlurUnits[kMaxSavedBlurUnits]{};
+std::uint32_t  g_savedBlurCount     = 0;
+CachedTaaUnit  g_cachedTaaUnits[kMaxCachedTaaUnits]{};
+std::uint32_t  g_cachedTaaCount     = 0;
+bool           g_postFiltersScanned = false;
+std::uint32_t  g_lastSeenFullStepEpoch = 0;
+std::uint32_t  g_emptyFilterRetryDiv   = 0;
 
 // Lock-free MtDTI -> WorldFreeze policy cache (safe across concurrent sUnit worker threads)
 enum class DtiPolicy : std::uint8_t {
@@ -855,8 +884,234 @@ bool TryDeliverDefenderOnlyGuardSEH(std::uintptr_t exeBase,
     }
 }
 
+bool IsUnitPresentInMoveLines(std::uintptr_t unitSys,
+                                std::uintptr_t targetUnit,
+                                std::uintptr_t expectedVft) {
+    if (!IsAlignedPtr(unitSys) || !IsAlignedPtr(targetUnit)) return false;
+    std::uint32_t lineCnt = *reinterpret_cast<const std::uint32_t*>(unitSys + mhw::kOffMoveLineCount);
+    if (lineCnt > 64U) lineCnt = 64U;
+    for (std::uint32_t line = 0; line < lineCnt; ++line) {
+        std::uintptr_t cur = *reinterpret_cast<const std::uintptr_t*>(
+            unitSys + static_cast<std::size_t>(line) * mhw::kMoveLineStride + mhw::kOffMoveLineFirstUnit);
+        for (int guard = 0; guard < 4096 && IsAlignedPtr(cur); ++guard) {
+            if (cur == targetUnit) {
+                return *reinterpret_cast<const std::uintptr_t*>(cur) == expectedVft;
+            }
+            cur = *reinterpret_cast<const std::uintptr_t*>(cur + mhw::kOffUnitNext);
+        }
+    }
+    return false;
+}
+
+void ScanAndSuppressPostFilters(std::uintptr_t exeBase, std::uintptr_t exeEnd) {
+    const std::uintptr_t unitSys = *reinterpret_cast<const std::uintptr_t*>(exeBase + mhw::kRvaSMhUnitInstance);
+    if (!IsAlignedPtr(unitSys)) return;
+
+    // Prune freed motion-blur units from previous scenes/quests before re-scanning
+    std::uint32_t liveBlur = 0;
+    for (std::uint32_t j = 0; j < g_savedBlurCount; ++j) {
+        if (IsUnitPresentInMoveLines(unitSys, g_savedBlurUnits[j].unit, g_savedBlurUnits[j].vft)) {
+            g_savedBlurUnits[liveBlur++] = g_savedBlurUnits[j];
+        }
+    }
+    g_savedBlurCount = liveBlur;
+
+    g_cachedTaaCount = 0;
+    std::uint32_t lineCnt = *reinterpret_cast<const std::uint32_t*>(unitSys + mhw::kOffMoveLineCount);
+    if (lineCnt > 64U) lineCnt = 64U;
+
+    for (std::uint32_t line = 0; line < lineCnt; ++line) {
+        std::uintptr_t cur = *reinterpret_cast<const std::uintptr_t*>(
+            unitSys + static_cast<std::size_t>(line) * mhw::kMoveLineStride + mhw::kOffMoveLineFirstUnit);
+        for (int guard = 0; guard < 4096 && IsAlignedPtr(cur); ++guard) {
+            const std::uintptr_t next = *reinterpret_cast<const std::uintptr_t*>(cur + mhw::kOffUnitNext);
+            const std::uintptr_t dti = GetObjectDtiFast(cur, exeBase, exeEnd);
+            if (dti != 0) {
+                const char* name = *reinterpret_cast<const char* const*>(dti + mhw::kOffDtiName);
+                if (name && IsCanonicalPtr(reinterpret_cast<std::uintptr_t>(name))) {
+                    std::uint8_t blurKind = 0;
+                    if (StartsWith(name, "uMotionBlurReconstructionFilter")) {
+                        blurKind = 1;
+                    } else if (StartsWith(name, "uMotionBlurFilter")) {
+                        blurKind = 2;
+                    }
+                    if (blurKind != 0) {
+                        const std::uintptr_t vft = *reinterpret_cast<const std::uintptr_t*>(cur);
+                        const std::size_t offS = (blurKind == 1) ? mhw::kOffMBReconShutter : mhw::kOffMBFilterShutter;
+                        const std::size_t offFS = (blurKind == 1) ? mhw::kOffMBReconFurShutter : mhw::kOffMBFilterFurShutter;
+                        const float curS  = *reinterpret_cast<const float*>(cur + offS);
+                        const float curFS = *reinterpret_cast<const float*>(cur + offFS);
+
+                        bool found = false;
+                        for (std::uint32_t j = 0; j < g_savedBlurCount; ++j) {
+                            if (g_savedBlurUnits[j].unit == cur && g_savedBlurUnits[j].vft == vft) {
+                                if (curS != 0.0f || curFS != 0.0f) {
+                                    g_savedBlurUnits[j].shutter    = curS;
+                                    g_savedBlurUnits[j].furShutter = curFS;
+                                }
+                                found = true;
+                                break;
+                            }
+                        }
+                        if (!found && g_savedBlurCount < kMaxSavedBlurUnits) {
+                            g_savedBlurUnits[g_savedBlurCount++] = SavedBlurUnit{cur, vft, blurKind, curS, curFS};
+                        }
+                        *reinterpret_cast<volatile float*>(cur + offS)  = 0.0f;
+                        *reinterpret_cast<volatile float*>(cur + offFS) = 0.0f;
+                    } else if (StartsWith(name, "uTemporalAAFilter")) {
+                        if (g_cachedTaaCount < kMaxCachedTaaUnits) {
+                            g_cachedTaaUnits[g_cachedTaaCount++] =
+                                CachedTaaUnit{cur, *reinterpret_cast<const std::uintptr_t*>(cur)};
+                        }
+                    }
+                }
+            }
+            cur = next;
+        }
+    }
+    g_postFiltersScanned = true;
+}
+
+void SuppressFullFreezeMotionBlurSEH(std::uintptr_t exeBase, std::uintptr_t exeEnd, bool forceRescan) {
+    __try {
+        if (!exeBase || !exeEnd) return;
+        const std::uintptr_t sMhShader = *reinterpret_cast<const std::uintptr_t*>(exeBase + mhw::kRvaSMhShaderInstance);
+        if (IsAlignedPtr(sMhShader)) {
+            const std::uint8_t curMb =
+                *reinterpret_cast<const std::uint8_t*>(sMhShader + mhw::kOffShaderMotionBlurEnable);
+            if (!g_hasSavedShaderMb || g_savedShaderPtr != sMhShader) {
+                g_savedShaderPtr      = sMhShader;
+                g_savedShaderMbEnable = curMb;
+                g_hasSavedShaderMb    = true;
+            } else if (curMb != 0) {
+                g_savedShaderMbEnable = curMb;
+            }
+            if (curMb != 0) {
+                *reinterpret_cast<volatile std::uint8_t*>(sMhShader + mhw::kOffShaderMotionBlurEnable) = 0;
+            }
+        }
+
+        const std::uint32_t stepEpoch = g_fullStepEpoch.load(std::memory_order_relaxed);
+        const bool emptyRetry = g_postFiltersScanned && g_savedBlurCount == 0 && g_cachedTaaCount == 0 &&
+                                ((++g_emptyFilterRetryDiv & 31U) == 0);
+        if (forceRescan || !g_postFiltersScanned || emptyRetry || stepEpoch != g_lastSeenFullStepEpoch) {
+            g_lastSeenFullStepEpoch = stepEpoch;
+            ScanAndSuppressPostFilters(exeBase, exeEnd);
+        } else if (g_savedBlurCount > 0) {
+            const std::uintptr_t unitSys = *reinterpret_cast<const std::uintptr_t*>(exeBase + mhw::kRvaSMhUnitInstance);
+            if (IsAlignedPtr(unitSys)) {
+                for (std::uint32_t j = 0; j < g_savedBlurCount; ++j) {
+                    SavedBlurUnit& b = g_savedBlurUnits[j];
+                    if (!IsUnitPresentInMoveLines(unitSys, b.unit, b.vft)) {
+                        g_postFiltersScanned = false;
+                        continue;
+                    }
+                    const std::size_t offS  = (b.kind == 1) ? mhw::kOffMBReconShutter    : mhw::kOffMBFilterShutter;
+                    const std::size_t offFS = (b.kind == 1) ? mhw::kOffMBReconFurShutter : mhw::kOffMBFilterFurShutter;
+                    const float curS  = *reinterpret_cast<const float*>(b.unit + offS);
+                    const float curFS = *reinterpret_cast<const float*>(b.unit + offFS);
+                    if (curS != 0.0f || curFS != 0.0f) {
+                        b.shutter    = curS;
+                        b.furShutter = curFS;
+                        *reinterpret_cast<volatile float*>(b.unit + offS)  = 0.0f;
+                        *reinterpret_cast<volatile float*>(b.unit + offFS) = 0.0f;
+                    }
+                }
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
+void AdvanceFullFreezeCameraAndTaaSEH(std::uintptr_t exeBase, std::uintptr_t exeEnd) {
+    __try {
+        if (!exeBase || !exeEnd) return;
+
+        // 1. Roll sCamera::Viewport previous matrices forward and kill mInterpRate
+        //    so TAA sees accurate Frame(N-1) -> Frame(N) reprojection under Free Camera movement.
+        const std::uintptr_t sCam = *reinterpret_cast<const std::uintptr_t*>(exeBase + mhw::kRvaSCameraInstance);
+        if (IsAlignedPtr(sCam)) {
+            *reinterpret_cast<volatile float*>(sCam + mhw::kOffSCamInterpRate) = 0.0f;
+            for (int vpIdx = 0; vpIdx < 8; ++vpIdx) {
+                const std::uintptr_t vp = sCam + static_cast<std::size_t>(vpIdx) * mhw::kCameraViewportStride;
+                std::memcpy(reinterpret_cast<void*>(vp + mhw::kOffVpPrevViewMat),
+                            reinterpret_cast<const void*>(vp + mhw::kOffVpViewMat), 64);
+                std::memcpy(reinterpret_cast<void*>(vp + mhw::kOffVpPrevProjMat),
+                            reinterpret_cast<const void*>(vp + mhw::kOffVpProjMat), 64);
+            }
+        }
+
+        // 2. Advance sMhRender active frame counter (+0x1F210) so TAA history buffers rotate normally.
+        const std::uintptr_t sMhRender =
+            *reinterpret_cast<const std::uintptr_t*>(exeBase + mhw::kRvaSMhRenderInstance);
+        if (IsAlignedPtr(sMhRender)) {
+            auto* pActiveFrame =
+                reinterpret_cast<volatile std::uint64_t*>(sMhRender + mhw::kOffRenderActiveFrameCount);
+            *pActiveFrame = *pActiveFrame + 1ULL;
+        }
+
+        // 3. Advance TAA Halton sub-pixel jitter via uTemporalAAFilter*::move (vft[9]) for the new frame index.
+        const std::uintptr_t unitSys = *reinterpret_cast<const std::uintptr_t*>(exeBase + mhw::kRvaSMhUnitInstance);
+        if (IsAlignedPtr(unitSys)) {
+            for (std::uint32_t i = 0; i < g_cachedTaaCount; ++i) {
+                const CachedTaaUnit& taa = g_cachedTaaUnits[i];
+                if (!IsUnitPresentInMoveLines(unitSys, taa.unit, taa.vft)) {
+                    g_postFiltersScanned = false;
+                    continue;
+                }
+                if (taa.vft < exeBase || taa.vft + mhw::kOffUnitVftMove + sizeof(std::uintptr_t) > exeEnd) continue;
+                const std::uintptr_t fnMoveAddr =
+                    *reinterpret_cast<const std::uintptr_t*>(taa.vft + mhw::kOffUnitVftMove);
+                if (fnMoveAddr >= exeBase && fnMoveAddr < exeEnd) {
+                    const auto fnMove = reinterpret_cast<UnitVftMoveFn>(fnMoveAddr);
+                    fnMove(taa.unit);
+                }
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
+void RestoreFullFreezeBlurSEH(std::uintptr_t exeBase) {
+    if (!g_hasSavedShaderMb && g_savedBlurCount == 0 && g_cachedTaaCount == 0 && !g_postFiltersScanned) return;
+    __try {
+        if (!exeBase) return;
+        if (g_hasSavedShaderMb) {
+            const std::uintptr_t curShader =
+                *reinterpret_cast<const std::uintptr_t*>(exeBase + mhw::kRvaSMhShaderInstance);
+            if (IsAlignedPtr(curShader) && curShader == g_savedShaderPtr) {
+                *reinterpret_cast<volatile std::uint8_t*>(curShader + mhw::kOffShaderMotionBlurEnable) =
+                    g_savedShaderMbEnable;
+            }
+            g_hasSavedShaderMb    = false;
+            g_savedShaderPtr      = 0;
+            g_savedShaderMbEnable = 0;
+        }
+
+        const std::uintptr_t unitSys = *reinterpret_cast<const std::uintptr_t*>(exeBase + mhw::kRvaSMhUnitInstance);
+        if (IsAlignedPtr(unitSys)) {
+            for (std::uint32_t i = 0; i < g_savedBlurCount; ++i) {
+                const SavedBlurUnit& b = g_savedBlurUnits[i];
+                if (!IsUnitPresentInMoveLines(unitSys, b.unit, b.vft)) continue;
+                const std::size_t offS  = (b.kind == 1) ? mhw::kOffMBReconShutter    : mhw::kOffMBFilterShutter;
+                const std::size_t offFS = (b.kind == 1) ? mhw::kOffMBReconFurShutter : mhw::kOffMBFilterFurShutter;
+                *reinterpret_cast<volatile float*>(b.unit + offS)  = b.shutter;
+                *reinterpret_cast<volatile float*>(b.unit + offFS) = b.furShutter;
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+    g_savedBlurCount      = 0;
+    g_cachedTaaCount      = 0;
+    g_postFiltersScanned  = false;
+    g_emptyFilterRetryDiv = 0;
+}
+
 bool ApplyMainFreezeSEH(std::uintptr_t exeBase, int mode) {
     // mode: 0 = unfreeze, 1 = freeze immediately, 2 = step 1 frame, 3 = per-frame sync
+    if (mode == 0) {
+        RestoreFullFreezeBlurSEH(exeBase);
+    }
     __try {
         if (!exeBase) return false;
         const std::uintptr_t mhMain = *reinterpret_cast<const volatile std::uintptr_t*>(
@@ -885,6 +1140,7 @@ bool ApplyMainFreezeSEH(std::uintptr_t exeBase, int mode) {
             *pPauseNext = 1;
             *pSkip      = 1;
             *pPause     = 0;
+            SuppressFullFreezeMotionBlurSEH(exeBase, g_exeEnd, true);
         } else if (mode == 0) {
             FlushAllCameraInputDeltas(exeBase, true);
             *pStepCount = 0;
@@ -899,8 +1155,10 @@ bool ApplyMainFreezeSEH(std::uintptr_t exeBase, int mode) {
             *pSkip      = 1;
             *pStepCount = 1;
         } else if (mode == 3) {
+            SuppressFullFreezeMotionBlurSEH(exeBase, g_exeEnd, false);
             if (*pStepCount == 0) {
                 FlushAllCameraInputDeltas(exeBase, true);
+                AdvanceFullFreezeCameraAndTaaSEH(exeBase, g_exeEnd);
             }
             if (*pPauseNext == 0) {
                 *pPauseNext = 1;
