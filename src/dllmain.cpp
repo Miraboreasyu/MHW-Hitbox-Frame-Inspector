@@ -148,6 +148,7 @@ std::uint8_t               g_vkToAction[256]{};
 int                        g_actionVks[7]{};
 std::atomic<std::uint8_t>  g_presentWorkMask{0};
 std::atomic<std::uint8_t>  g_edgeKeyMask{0};
+std::atomic<bool>          g_pendingBurstToggle{false};
 std::atomic<std::uint8_t>  g_heldKeyMask{0};
 std::atomic<bool>          g_panelOpenAtomic{false};
 std::atomic<std::uint32_t> g_panelCmdMask{0};
@@ -379,6 +380,12 @@ bool MatchChatCommandHot(const char* msg, std::uint8_t& outActionBit, const char
     if (ExactChatStringEquals(msg, g_liveChatCfg.cmdOverlay, cs)) {
         outActionBit  = kKeyToggleOverlay;
         outActionName = "\\ (Overlay)";
+        return true;
+    }
+    if (ExactChatStringEquals(msg, g_liveChatCfg.cmdFreezeBurst, cs)) {
+        outActionBit  = 0;
+        outActionName = "Freeze Burst toggle";
+        g_pendingBurstToggle.store(true, std::memory_order_release);
         return true;
     }
     return false;
@@ -830,8 +837,8 @@ void ApplyPanelCommands(std::uint32_t cmds) noexcept {
             }
         }
     } else {
-        // Page 0: Main Filter & Scene Panel (18 rows: 0..17)
-        constexpr int kMainPanelRows = 18;
+        // Page 0: Main Filter & Scene Panel (19 rows: 0..18)
+        constexpr int kMainPanelRows = 19;
         if ((cmds & kPanelUp) != 0) {
             g_viewState.panelCursor = (g_viewState.panelCursor + kMainPanelRows - 1) % kMainPanelRows;
         }
@@ -958,6 +965,8 @@ void ApplyPanelCommands(std::uint32_t cmds) noexcept {
                         EnsureEmPartVisEnabled();
                     }
                 }
+            } else if (row == 18) {
+                freeze::ToggleWorldFreezeBurst();
             }
         };
 
@@ -1089,7 +1098,11 @@ __declspec(noinline) void ProcessPresentWork(std::uintptr_t d3dRender) {
     static constexpr std::uint8_t kFreezeCamKeyMask =
         kKeyFreeze | kKeyWorldFreeze | kKeyKeepHitbox | kKeyStep;
 
-    if (edges != 0 || panelCmd != 0) {
+    if (edges != 0 || panelCmd != 0 || g_pendingBurstToggle.load(std::memory_order_relaxed)) {
+        if (g_pendingBurstToggle.exchange(false, std::memory_order_acq_rel)) {
+            const bool on = freeze::ToggleWorldFreezeBurst();
+            app::Log("chat: World Freeze Delayed Burst %s", on ? "ON" : "OFF");
+        }
         // Arm camera-nudge guard ONLY when freeze/step hotkeys (I/K/J/O) are pressed —
         // never patch cUnit::genericMove for [P] panel navigation or [U] toggle!
         if ((edges & kFreezeCamKeyMask) != 0) {
@@ -1342,6 +1355,45 @@ bool TryInstallHooks(HMODULE exe) {
         scene::SetOrigSUnitDraw(origUnitDraw);
     }
 
+    // World Freeze Delayed Burst capture hooks (patched into .text ONLY while World Freeze + option are active)
+    {
+        static constexpr std::uint8_t kPrologueDmgNum[5]  = {0x48, 0x89, 0x5C, 0x24, 0x08};
+        static constexpr std::uint8_t kPrologueHitEfc[5]  = {0x48, 0x89, 0x7C, 0x24, 0x20};
+        static constexpr std::uint8_t kPrologueShake1[5]  = {0x48, 0x89, 0x5C, 0x24, 0x10};
+        static constexpr std::uint8_t kPrologueShake2[5]  = {0x48, 0x89, 0x5C, 0x24, 0x18};
+        static constexpr std::uint8_t kPrologueHitFb[5]   = {0x48, 0x89, 0x74, 0x24, 0x18};
+        struct BurstHookDef {
+            hook::DynHookId id;
+            std::uintptr_t  rva;
+            void*           detour;
+            const std::uint8_t* prologue;
+            int             slot;
+        };
+        const BurstHookDef defs[] = {
+            {hook::kDynDmgNum,      mhw::kRvaShowDamageNumber,      reinterpret_cast<void*>(&freeze::Hook_BurstDmgNum),       kPrologueDmgNum, 0},
+            {hook::kDynDmgNumZorah, mhw::kRvaShowDamageNumberZorah, reinterpret_cast<void*>(&freeze::Hook_BurstDmgNumZorah),  kPrologueDmgNum, 1},
+            {hook::kDynDmgNumEx,    mhw::kRvaShowDamageNumberEx,    reinterpret_cast<void*>(&freeze::Hook_BurstDmgNumEx),     kPrologueDmgNum, 2},
+            {hook::kDynHitEfc,      mhw::kRvaSpawnHitEfcHelper,     reinterpret_cast<void*>(&freeze::Hook_BurstHitEfc),       kPrologueHitEfc, 3},
+            {hook::kDynShake1,      mhw::kRvaAddShake1,             reinterpret_cast<void*>(&freeze::Hook_BurstShake1),       kPrologueShake1, 4},
+            {hook::kDynShake2,      mhw::kRvaAddShake2,             reinterpret_cast<void*>(&freeze::Hook_BurstShake2),       kPrologueShake2, 5},
+            {hook::kDynHitFeedback, mhw::kRvaOnAttackHitFeedback,   reinterpret_cast<void*>(&freeze::Hook_BurstHitFeedback),  kPrologueHitFb,  6},
+        };
+        int prepared = 0;
+        for (const BurstHookDef& d : defs) {
+            const std::uintptr_t site = base + d.rva;
+            void* orig = nullptr;
+            if (HasValidOrChainedPrologue(site, d.prologue, 5) &&
+                hook::PrepareDynamicHook5(d.id, site, d.detour, &orig, d.prologue)) {
+                freeze::SetOrigBurstHook(d.slot, orig);
+                ++prepared;
+            } else {
+                app::Log("init: warning - burst hook slot %d unavailable at %p", d.slot, reinterpret_cast<void*>(site));
+            }
+        }
+        app::Log("init: World Freeze Delayed Burst: %d/7 capture hooks prepared (option=%d)",
+                 prepared, g_cfg.worldFreezeDelayedBurst ? 1 : 0);
+    }
+
     void* origGuardDispatch = nullptr;
     if (HasValidOrChainedPrologue(guardSite, mhw::kGuardDispatchPrologue, sizeof(mhw::kGuardDispatchPrologue)) &&
         hook::PrepareLazyGuardHook(guardSite,
@@ -1361,6 +1413,7 @@ bool TryInstallHooks(HMODULE exe) {
     g_gamepadPanelEnabled.store(g_cfg.gamepadPanel, std::memory_order_release);
     freeze::InitModuleRange(base, end);
     freeze::SetKeepHitboxesActive(g_cfg.keepHitboxesActive);
+    freeze::SetWorldFreezeBurst(g_cfg.worldFreezeDelayedBurst);
     scene::InitModuleRange(base, end);
 
     g_viewState.visMask       = g_cfg.defaultVisMask;
@@ -1447,6 +1500,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved) {
         }
         if (g_exeBase) {
             scene::Shutdown(g_exeBase);
+            freeze::BurstAbort();
             freeze::SetWorldFrozen(g_exeBase, false);
             freeze::SetFrozen(g_exeBase, false);
         }

@@ -6,7 +6,7 @@
 
 ## 中文说明
 
-面向《怪物猎人：世界 冰原》（Steam 15.23）的实时判定框可视化、怪物部位肉质/软化分区检视、地图地形碰撞查看与零延迟时停步进工具，兼容 DirectX 11 / DirectX 12 以及 SDR / HDR 显示。
+面向《怪物猎人：世界 冰原》（Steam 15.23）的实时判定框可视化、怪物部位肉质/软化分区检视、地图地形碰撞查看与零延迟时停步进工具，兼容 DirectX 11 / DirectX 12、16:9 / 21:9 超宽屏以及 SDR / HDR 显示。
 
 ### 前置要求与安装
 
@@ -53,10 +53,11 @@
 - **全局冻结（Full Freeze）**：瞬时零延迟定格整个游戏，屏幕顶部居中与四角显示显眼冻结提示（即使关闭 `[U]` 视图也始终可见），冻结期间可自由调整面板筛选与观察细节。
 - **世界冻结（World Freeze）**：仅暂停怪物、弹道/吐息特效、随从与机关，玩家与武器照常自由行动，重置/切换任务或返回据点时自动解除冻结，便于安全测试招式判定、打点、翻滚无敌帧与 GP/见切。
 - **单次判定框常驻（Keep Hitboxes Active）**：世界冻结下保持火球、吐息、单次近战/投技等判定框在命中或防御后不消失，可反复练习翻滚、见切与 GP。
+- **世界冻结延迟爆发（World Freeze Delayed Burst，默认开启）**：修复世界冻结下连续攻击导致的去重缓存（`cCache[32]`）与固定特效/伤害池溢出崩溃；冻结期间照常保留实时命中特效、武器命中音效、卡肉与运镜震动并暂存伤害数字，解除时停后按节奏错峰爆发重放伤害数字、命中特效、优先级运镜与视野冲击（FOV Punch），可通过 `[P]` 面板第 18 行或聊天命令 `$freeze_burst` 实时切换。
 - **逐帧步进（+1 Frame）**：在全局冻结或世界冻结下精确推进 1 帧。
 
 #### 5. 游戏内聊天 / 快捷轮盘定型文触发与手柄操控面板
-- **聊天 / 轮盘定型文激活**：通过游戏内聊天或快捷轮盘定型文触发 6 个核心功能，绕开手柄按键紧张的限制；仅响应本地玩家主动发言，支持连续重复发送同一条定型文，且支持在游戏运行中修改 `mhw_hfi.ini` 后免重启热刷新。
+- **聊天 / 轮盘定型文激活**：通过游戏内聊天或快捷轮盘定型文触发 8 个核心功能，绕开手柄按键紧张的限制；仅响应本地玩家主动发言，支持连续重复发送同一条定型文，且支持在游戏运行中修改 `mhw_hfi.ini` 后免重启热刷新。
 - **手柄操控面板**：打开筛选面板后，可直接使用手柄十字键与 `A`（PS `×`）键浏览和修改所有选项，面板展开期间自动避免误触翻滚与道具栏滚动，按住 `LB` 呼出快捷轮盘或打开聊天框打字时自动放行。
 
 ---
@@ -110,6 +111,7 @@
 | `←` / `→`（第 15 行） | Entity Line Width | 调节怪物/玩家/机关线条粗细（`0.35x` ~ `3.00x`） |
 | `←` / `→`（第 16 行） | SBC / Raw Line Width | 调节地形网格/纯线框/距离环线条粗细（`0.35x` ~ `3.00x`） |
 | **`TAB`**（或第 17 行） | Monster Part Filter | 选中按 `←` / `→` 快切分区模式，按 `Space` / `Enter` 进入怪物部位检视器 |
+| `←` / `→`（第 18 行） | Freeze Delayed Burst | 开关世界冻结延迟爆发模式（`ON` / `OFF`，默认 `ON`） |
 
 #### 3. `[P]` → `[TAB]` 怪物部位检视器操作
 
@@ -135,7 +137,7 @@
 
 #### 5. 游戏内聊天 / 快捷轮盘定型文触发
 
-仅支持触发 7 个核心主热键，采用**完整字符串精确匹配**（可在游戏内直接打字发送，或填入自定义定型文并绑到快捷轮盘）：
+支持触发 7 个核心主热键及世界冻结延迟爆发开关，采用**完整字符串精确匹配**（可在游戏内直接打字发送，或填入自定义定型文并绑到快捷轮盘）：
 
 | 对应主热键 | 功能 | 默认触发字符串 | `.ini` 配置项 |
 |---|---|---|---|
@@ -146,6 +148,7 @@
 | **`J`** | 开关单次判定框常驻 | `$keep_hitbox` | `ChatCmdKeepHitbox` |
 | **`P`** | 打开 / 关闭筛选面板 | `$show_panel` | `ChatCmdPanel` |
 | **`\`** | 显示 / 隐藏插件 2D Overlay（纯净截图） | `$show_overlay` | `ChatCmdOverlay` |
+| `—`（`[P]` 第 18 行） | 开关世界冻结延迟爆发 | `$freeze_burst` | `ChatCmdFreezeBurst` |
 
 - **默认不区分英文大小写**（`ChatCaseSensitive=0`），可在 `mhw_hfi.ini` 中改为 `1` 开启严格区分大小写。
 - **自定义与热刷新**：游戏运行期间随时编辑并保存 `nativePC\plugins\mhw_hfi.ini`（中文/日文定型文请保存为 UTF-8 编码），下一次发聊天/定型文或打开面板时即时生效，无需重启游戏。将任意一项留空或填 `NONE` 可单独禁用该命令。
@@ -162,11 +165,12 @@
 | `KeyToggleVis` / `KeyToggleFreeze` / `KeyFreezeOthers` / `KeyPersistHitbox` / `KeyStepFrame` / `KeyCycleFilter` / `KeyToggleOverlay` | `U` / `I` / `K` / `J` / `O` / `P` / `\` | 自定义 7 个主热键（支持字母、数字、`F1`~`F24`、`NUMPAD0`~`9`、`\` 等） |
 | `StartVisOn` | `0` | 启动游戏后默认是否自动开启视图 |
 | `KeepHitboxesActive` | `1` | 世界冻结下默认开启单次判定框常驻 |
+| `WorldFreezeDelayedBurst` | `1` | 世界冻结延迟爆发模式：防止连击溢出崩溃，时停保留实时特效/音效/卡肉/震动，解除后错峰爆发伤害数字、特效、运镜与视野冲击 |
 | `BlockCameraKeys` | `1` | 屏蔽游戏 `O / K / L / ;` 转视角键 |
 | `ShowHudBanner` | `1` | 显示左上角状态提示条 |
 | `ChatCommands` | `1` | 开关聊天/定型文触发（支持热刷新） |
 | `ChatCaseSensitive` | `0` | 聊天命令是否区分英文大小写（支持热刷新） |
-| `ChatCmdVis` / `ChatCmdFreeze` / `ChatCmdWorldFreeze` / `ChatCmdStep` / `ChatCmdKeepHitbox` / `ChatCmdPanel` / `ChatCmdOverlay` | `$draw_hitbox` / `$full_freeze` / `$ThE_WoRLD!!!` / `$step_frame` / `$keep_hitbox` / `$show_panel` / `$show_overlay` | 自定义 7 个聊天/定型文触发词（UTF-8，支持热刷新） |
+| `ChatCmdVis` / `ChatCmdFreeze` / `ChatCmdWorldFreeze` / `ChatCmdStep` / `ChatCmdKeepHitbox` / `ChatCmdPanel` / `ChatCmdOverlay` / `ChatCmdFreezeBurst` | `$draw_hitbox` / `$full_freeze` / `$ThE_WoRLD!!!` / `$step_frame` / `$keep_hitbox` / `$show_panel` / `$show_overlay` / `$freeze_burst` | 自定义 8 个聊天/定型文触发词（UTF-8，支持热刷新） |
 | `GamepadPanel` | `1` | 开关 `[P]` 面板手柄操控（支持热刷新） |
 | `LineThickness` / `EntityLineScale` / `SbcLineScale` | `2.0` / `1.0` / `1.0` | 基础线宽与实体/地形线宽倍率 |
 | `OpacityScale` / `SbcSurfaceOpacity` / `HdrNits` | `1.0` / `1.0` / `0` | 全局透明度、地形半透明面透明度、HDR 亮度（`0` 为自动） |
@@ -179,7 +183,7 @@
 
 ## English Guide
 
-A real-time hitbox/hurtbox visualization, monster part hitzone & Clutch Claw soften-zone inspector, stage terrain collision viewer, and zero-delay freeze/frame-stepping tool for **Monster Hunter: World Iceborne (Steam 15.23)**, compatible with both DirectX 11 / DirectX 12 and SDR / HDR displays.
+A real-time hitbox/hurtbox visualization, monster part hitzone & Clutch Claw soften-zone inspector, stage terrain collision viewer, and zero-delay freeze/frame-stepping tool for **Monster Hunter: World Iceborne (Steam 15.23)**, compatible with DirectX 11 / DirectX 12, 16:9 / 21:9 ultrawide displays, and SDR / HDR.
 
 ### Requirements & Installation
 
@@ -226,10 +230,11 @@ All modes preserve the in-game player UI and normal map interactions:
 - **Full Freeze**: Instantly freezes the entire game with zero delay, displaying a prominent top-center banner and corner brackets (always visible even when `[U]` visualization is OFF); you can still adjust panel filters and inspect details while frozen.
 - **World Freeze**: Pauses only monsters, projectiles/breath effects, companions, and gimmicks while the player and weapon move freely, and automatically unfreezes on quest reset, stage transitions, or returning to Hub—ideal for safely testing attack hitboxes, spacing, roll i-frames, Guard Points, and Foresight/counters.
 - **Keep Hitboxes Active**: Keeps single-trigger hitboxes (fireballs, breaths, single-hit swings/grabs) from disappearing after hitting or being guarded during World Freeze, allowing repeated dodge, counter, and GP practice.
+- **World Freeze Delayed Burst (ON by default)**: Fixes dedup cache (`cCache[32]`) and fixed-size VFX/damage pool overflows caused by repeated hits during World Freeze; keeps hit VFX, weapon hit sounds, hitstop, and camera shakes live during freeze while holding back damage numbers, then bursts out paced damage numbers, hit VFX, priority-ranked camera shakes, and a resume FOV punch when World Freeze ends. Toggle live via `[P]` panel row 18 or `$freeze_burst`.
 - **Single-Frame Step (+1 Frame)**: Advances exactly 1 frame while in Full Freeze or World Freeze.
 
 #### 5. In-Game Chat / Radial Shoutout Triggers & Controller Panel Control
-- **Chat / Radial Shoutout Activation**: Trigger the 6 core functions via in-game chat or Radial Menu custom shoutouts, bypassing tight controller button budgets; responds only to local player messages, supports sending the same shoutout consecutively to trigger repeatedly, and supports hot-reloading edits to `mhw_hfi.ini` while the game is running without restarting.
+- **Chat / Radial Shoutout Activation**: Trigger the 8 core functions via in-game chat or Radial Menu custom shoutouts, bypassing tight controller button budgets; responds only to local player messages, supports sending the same shoutout consecutively to trigger repeatedly, and supports hot-reloading edits to `mhw_hfi.ini` while the game is running without restarting.
 - **Controller Panel Navigation**: Once the filter panel is open, browse and adjust all options directly with the controller D-Pad and `A` (PS `×`). While the panel is open, accidental rolls and item bar scrolling are prevented automatically; holding `LB` for the Radial Menu or opening a chat/text input automatically passes inputs through to the game.
 
 ---
@@ -283,6 +288,7 @@ After opening the panel with **`P`**:
 | `Left` / `Right` (Row 15) | Entity Line Width | Adjust monster/player/entity line thickness (`0.35x` ~ `3.00x`) |
 | `Left` / `Right` (Row 16) | SBC / Raw Line Width | Adjust terrain mesh / raw wireframe / ground ring line thickness (`0.35x` ~ `3.00x`) |
 | **`TAB`** (or Row 17) | Monster Part Filter | Press `Left` / `Right` on this row to quick-switch partition mode; press `Space` / `Enter` to open the Monster Parts Inspector |
+| `Left` / `Right` (Row 18) | Freeze Delayed Burst | Toggle World Freeze Delayed Burst (`ON` / `OFF`, default `ON`) |
 
 #### 3. `[P]` → `[TAB]` Monster Parts Inspector Operation
 
@@ -308,7 +314,7 @@ When the `[P]` panel is open, you can control it directly with a controller (key
 
 #### 5. In-Game Chat / Radial Shoutout Triggers
 
-Supports triggering ONLY the 7 core main hotkeys via **exact full-string match** (works by typing directly in in-game chat or binding custom shoutouts to the Radial Menu):
+Supports triggering the 7 core main hotkeys plus World Freeze Delayed Burst via **exact full-string match** (works by typing directly in in-game chat or binding custom shoutouts to the Radial Menu):
 
 | Main Hotkey | Action | Default Trigger String | `.ini` Key |
 |---|---|---|---|
@@ -319,6 +325,7 @@ Supports triggering ONLY the 7 core main hotkeys via **exact full-string match**
 | **`J`** | Toggle Keep Single-Trigger Hitboxes Active | `$keep_hitbox` | `ChatCmdKeepHitbox` |
 | **`P`** | Open / close filter panel | `$show_panel` | `ChatCmdPanel` |
 | **`\`** | Show / hide plugin 2D Overlay (clean screenshots) | `$show_overlay` | `ChatCmdOverlay` |
+| `—` (`[P]` Row 18) | Toggle World Freeze Delayed Burst | `$freeze_burst` | `ChatCmdFreezeBurst` |
 
 - **Case-insensitive for ASCII letters by default** (`ChatCaseSensitive=0`); change to `1` in `mhw_hfi.ini` to require strict case-sensitive matching.
 - **Customization & Hot-Reload**: Edit and save `nativePC\plugins\mhw_hfi.ini` at any time while the game is running (save as UTF-8 when using Chinese/Japanese shoutouts). Changes take effect on the very next chat/shoutout or panel open without restarting the game. Leave any entry empty or set it to `NONE` to disable that individual command.
@@ -335,11 +342,12 @@ A default `mhw_hfi.ini` containing all default values is included in the archive
 | `KeyToggleVis` / `KeyToggleFreeze` / `KeyFreezeOthers` / `KeyPersistHitbox` / `KeyStepFrame` / `KeyCycleFilter` / `KeyToggleOverlay` | `U` / `I` / `K` / `J` / `O` / `P` / `\` | Customize the 7 main hotkeys (supports letters, digits, `F1`–`F24`, `NUMPAD0`–`9`, `\`, etc.) |
 | `StartVisOn` | `0` | Whether visualization starts ON automatically at game launch |
 | `KeepHitboxesActive` | `1` | Keep single-trigger hitboxes active by default during World Freeze |
+| `WorldFreezeDelayedBurst` | `1` | World Freeze Delayed Burst: prevents hit/pool overflow crashes, keeps live VFX/sound/hitstop/shakes during freeze, and bursts damage numbers, VFX, shakes & FOV punch on resume |
 | `BlockCameraKeys` | `1` | Block in-game `O / K / L / ;` camera rotation keys |
 | `ShowHudBanner` | `1` | Show top-left HUD status banner |
 | `ChatCommands` | `1` | Enable/disable chat & shoutout triggers (hot-reloadable) |
 | `ChatCaseSensitive` | `0` | Whether chat commands are ASCII case-sensitive (hot-reloadable) |
-| `ChatCmdVis` / `ChatCmdFreeze` / `ChatCmdWorldFreeze` / `ChatCmdStep` / `ChatCmdKeepHitbox` / `ChatCmdPanel` / `ChatCmdOverlay` | `$draw_hitbox` / `$full_freeze` / `$ThE_WoRLD!!!` / `$step_frame` / `$keep_hitbox` / `$show_panel` / `$show_overlay` | Customize the 7 chat/shoutout trigger strings (UTF-8, hot-reloadable) |
+| `ChatCmdVis` / `ChatCmdFreeze` / `ChatCmdWorldFreeze` / `ChatCmdStep` / `ChatCmdKeepHitbox` / `ChatCmdPanel` / `ChatCmdOverlay` / `ChatCmdFreezeBurst` | `$draw_hitbox` / `$full_freeze` / `$ThE_WoRLD!!!` / `$step_frame` / `$keep_hitbox` / `$show_panel` / `$show_overlay` / `$freeze_burst` | Customize the 8 chat/shoutout trigger strings (UTF-8, hot-reloadable) |
 | `GamepadPanel` | `1` | Enable/disable controller navigation for the `[P]` panel (hot-reloadable) |
 | `LineThickness` / `EntityLineScale` / `SbcLineScale` | `2.0` / `1.0` / `1.0` | Base line thickness and entity/terrain line width multipliers |
 | `OpacityScale` / `SbcSurfaceOpacity` / `HdrNits` | `1.0` / `1.0` / `0` | Global opacity, semi-transparent terrain surface opacity, and HDR luminance (`0` = auto) |

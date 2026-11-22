@@ -168,6 +168,7 @@ struct ChatCommandConfig {
     std::string cmdKeepHitbox  = "$keep_hitbox";   // J: Keep single-trigger hitboxes active
     std::string cmdPanel       = "$show_panel";    // P: Open / close Filter & Scene Panel
     std::string cmdOverlay     = "$show_overlay";  // \: Show / hide 2D HUD overlay & freeze banner
+    std::string cmdFreezeBurst = "$freeze_burst";  // Toggle World Freeze Delayed Burst (damage numbers / VFX / camera cues)
 };
 
 struct Config {
@@ -182,6 +183,7 @@ struct Config {
 
     bool startVisOn         = false; // Whether hitbox display starts ON automatically
     bool keepHitboxesActive = true;  // Keep single-trigger frozen hitboxes active & repeatable in World Freeze
+    bool worldFreezeDelayedBurst = true; // Defer damage numbers / hit VFX / camera cues during World Freeze, burst on resume
     bool blockCameraKeys    = true;  // Block O/K/L/; camera rotation keys while mod is loaded (except in chat)
     bool gamepadPanel       = true;  // Controller D-Pad + A navigation when [P] panel is open
     ChatCommandConfig chat{};        // In-game chat exact-match triggers (configurable & hot-reloadable via .ini)

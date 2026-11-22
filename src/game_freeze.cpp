@@ -46,6 +46,11 @@ bool g_prevPlActionDef = false;
 constexpr std::uint8_t kMoveFlagWorldFreeze  = 0x01U;
 constexpr std::uint8_t kMoveFlagStepCamGuard = 0x02U;
 constexpr std::uint8_t kMoveFlagSuppressKb   = 0x04U;
+constexpr std::uint8_t kMoveFlagBurstDrain   = 0x08U;
+
+// World Freeze Delayed Burst state (queues/hooks implemented at the end of this file)
+std::atomic<bool> g_burstEnabled{false};      // user option (WorldFreezeDelayedBurst)
+std::atomic<bool> g_burstDrainPending{false}; // deferred records waiting to burst out after resume
 
 inline void RefreshUnitMoveFlags() {
     std::uint8_t f = 0;
@@ -57,7 +62,19 @@ inline void RefreshUnitMoveFlags() {
         f |= kMoveFlagStepCamGuard;
     if (g_suppressKbActive.load(std::memory_order_relaxed))
         f |= kMoveFlagSuppressKb;
+    if (g_burstDrainPending.load(std::memory_order_relaxed) &&
+        !g_frozen.load(std::memory_order_relaxed) && !worldFrz)
+        f |= kMoveFlagBurstDrain;
     g_unitMoveHookFlags.store(f, std::memory_order_release);
+
+    const bool needBurstCapture = worldFrz && g_burstEnabled.load(std::memory_order_relaxed);
+    hook::SetDynamicHook5Enabled(hook::kDynDmgNum,      needBurstCapture);
+    hook::SetDynamicHook5Enabled(hook::kDynDmgNumZorah, needBurstCapture);
+    hook::SetDynamicHook5Enabled(hook::kDynDmgNumEx,    needBurstCapture);
+    hook::SetDynamicHook5Enabled(hook::kDynHitEfc,      needBurstCapture);
+    hook::SetDynamicHook5Enabled(hook::kDynShake1,      needBurstCapture);
+    hook::SetDynamicHook5Enabled(hook::kDynShake2,      needBurstCapture);
+    hook::SetDynamicHook5Enabled(hook::kDynHitFeedback, needBurstCapture);
 
     const bool needHitKeep = worldFrz && g_keepHitboxesActive.load(std::memory_order_relaxed);
     if (needHitKeep) {
@@ -541,8 +558,8 @@ void ProcessFrozenObjCollision(std::uintptr_t exeBase, std::uintptr_t comp, bool
     *reinterpret_cast<volatile std::uint32_t*>(comp + mhw::kOffObjCollStateFlags) = f198;
     *reinterpret_cast<volatile std::uint32_t*>(comp + mhw::kOffObjCollFlags19C)   = f19C;
 
-    // 3. Guarantee positive mAge on every occupied cCache[32] slot AND garbage-collect finished swings (>120f)
-    //    so FUN_1412d5100 NEVER hits the 0.0f < 0.0f eviction lockup regardless of hit count or sharpness drop!
+    // 3. Guarantee positive mAge on every occupied cCache[32] slot AND garbage-collect finished swings (>=4f)
+    //    so FUN_1412d5100 NEVER hits the 0.0f < 0.0f eviction lockup or 32-slot saturation under high hit-rate spam!
     for (std::size_t i = 0; i < 32; ++i) {
         const std::uintptr_t slot = comp + mhw::kOffObjCollCacheBase + i * mhw::kObjCollCacheStride;
         const std::int32_t uid = *reinterpret_cast<const std::int32_t*>(slot + mhw::kOffCacheUid);
@@ -553,7 +570,7 @@ void ProcessFrozenObjCollision(std::uintptr_t exeBase, std::uintptr_t comp, bool
             age = 1.0f;
             *reinterpret_cast<volatile float*>(slot + mhw::kOffCacheAge) = age;
         }
-        if (age > 120.0f) {
+        if (age >= 4.0f) {
             const std::uintptr_t atkNode = *reinterpret_cast<const std::uintptr_t*>(slot + mhw::kOffCacheAtkNode);
             const bool stillActive = IsAlignedPtr(atkNode) &&
                                      (*reinterpret_cast<const std::uint8_t*>(atkNode + mhw::kOffCNodeIsActive) == 1);
@@ -976,6 +993,15 @@ void __fastcall Hook_UnitGenericMove(std::uintptr_t unit) {
         }
     }
 
+    // Delayed Burst: replay deferred damage numbers / camera cues once per frame on the sim thread
+    if ((fastFlags & kMoveFlagBurstDrain) != 0) {
+        std::uintptr_t drainAnchor = g_cachedMainPlayer.load(std::memory_order_relaxed);
+        if (!drainAnchor) drainAnchor = g_cachedActiveCam.load(std::memory_order_relaxed);
+        if (drainAnchor != 0 && unit == drainAnchor) {
+            BurstDrainTick(exeBase);
+        }
+    }
+
     // WorldFreeze ("Pause Everything Except Player")
     if ((fastFlags & kMoveFlagWorldFreeze) != 0 &&
         g_worldFrozen.load(std::memory_order_acquire) &&
@@ -1060,6 +1086,7 @@ void SetFrozen(std::uintptr_t exeBase, bool frozen) {
             g_worldStepReq.store(0, std::memory_order_relaxed);
             g_worldFreezeOwnerPl = 0;
             g_worldFreezeNullPlFrames = 0;
+            BurstOnWorldResume();
             ClearWorldEffectsTable();
             ClearPinnedNodesTable();
         }
@@ -1097,6 +1124,7 @@ void SetWorldFrozen(std::uintptr_t exeBase, bool worldFrozen) {
         g_worldSettledTicks.store(0, std::memory_order_relaxed);
         g_worldStepReq.store(0, std::memory_order_relaxed);
         g_worldStepActive.store(false, std::memory_order_relaxed);
+        BurstBeginSession();
         g_worldFrozen.store(true, std::memory_order_release);
         RefreshUnitMoveFlags();
         app::Log("freeze: World Freeze ON (everything paused except Player, keepHitboxes=%s)",
@@ -1107,6 +1135,7 @@ void SetWorldFrozen(std::uintptr_t exeBase, bool worldFrozen) {
         g_worldStepActive.store(false, std::memory_order_relaxed);
         g_worldFreezeOwnerPl      = 0;
         g_worldFreezeNullPlFrames = 0;
+        BurstOnWorldResume();
         RefreshUnitMoveFlags();
         ClearWorldEffectsTable();
         ClearPinnedNodesTable();
@@ -1180,6 +1209,7 @@ bool SyncActiveFrame(std::uintptr_t exeBase, bool anyModKeyHeld) {
             app::Log("freeze: stage/quest transition detected (pl %p -> %p), auto-resuming World Freeze",
                      reinterpret_cast<void*>(g_worldFreezeOwnerPl),
                      reinterpret_cast<void*>(curPl));
+            BurstAbort();
             SetWorldFrozen(exeBase, false);
             worldFrz = false;
         }
@@ -1202,6 +1232,719 @@ Mode CurrentMode() {
     if (g_frozen.load(std::memory_order_relaxed))      return Mode::Full;
     if (g_worldFrozen.load(std::memory_order_relaxed)) return Mode::World;
     return Mode::None;
+}
+
+// ============================================================================
+//  World Freeze Delayed Burst
+//
+//  Engine limits being protected (MHW:I 15.23):
+//    - uGUIHudDamage      : 20 slots   -> drop hits beyond 20 unless paced
+//    - cCameraShakeManager:  8 slots   -> priority/sequence eviction
+//    - sMhUnit MoveLine[0x13] (uMhEffect units, hit VFX) -> pool exhaustion crash
+//  Strategy:
+//    - damage numbers: queued as POD records with hit-time monster pos, replayed paced while
+//      free HUD slots exist (tracking live monster displacement)
+//    - hit VFX: live hit VFX + native hit sound play normally during World Freeze (with
+//      MoveLine[0x13] pool guard fallback to sound-only above 220 units), while the full
+//      0xF0-byte cMhEfcParam POD is queued to burst out again paced when World Freeze resumes
+//    - camera shakes: live camera shakes play normally during World Freeze (8-slot priority
+//      eviction is overflow-safe), while 0xD0-byte cShakeParam records are also queued to
+//      replay cascadingly by priority/amplitude when World Freeze resumes
+//    - player hitstop ("卡肉"): 100% native during World Freeze; hit count feeds resume FOV punch
+// ============================================================================
+namespace {
+
+using DmgNumFn   = void(__fastcall*)(std::uintptr_t, std::uintptr_t, std::int32_t, const float*,
+                                     std::uint32_t, std::uint32_t, std::uint32_t, std::int32_t, std::uint8_t);
+using DmgNumExFn = void(__fastcall*)(std::uintptr_t, std::uintptr_t, std::int32_t, const float*,
+                                     std::uint32_t, std::uint32_t, std::uint32_t, std::uint8_t,
+                                     std::uint32_t, std::uint32_t, std::uint8_t);
+using HitEfcFn   = void(__fastcall*)(long long*, std::uintptr_t, std::int32_t, std::int32_t, std::uintptr_t);
+using Shake1Fn   = std::int32_t(__fastcall*)(std::uintptr_t, const void*, const float*);
+using Shake2Fn   = std::int32_t(__fastcall*)(std::uintptr_t, const void*, std::uint32_t, const float*);
+using HitFbFn    = void(__fastcall*)(std::uintptr_t, std::uintptr_t, std::int32_t);
+using EpvGetElemFn = std::uintptr_t(__fastcall*)(std::uintptr_t epv, std::int32_t elemIdx, std::int32_t efxIdx);
+using WwiseCallByIdFn = void(__fastcall*)(std::uintptr_t container, std::uintptr_t unit,
+                                          std::uint32_t bankId, std::uint32_t eventId, const void* param);
+using SMhEffectCreateFn = std::uintptr_t(__fastcall*)(std::uintptr_t sMhEffect, std::uintptr_t dti,
+                                                      std::uintptr_t epv, std::int32_t elemIdx,
+                                                      std::int32_t efxIdx, void* efcp,
+                                                      std::uintptr_t parentUnit, std::uintptr_t elemOverride);
+
+DmgNumFn   g_origDmgNum       = nullptr;
+DmgNumFn   g_origDmgNumZorah  = nullptr;
+DmgNumExFn g_origDmgNumEx     = nullptr;
+HitEfcFn   g_origHitEfc       = nullptr;
+Shake1Fn   g_origShake1       = nullptr;
+Shake2Fn   g_origShake2       = nullptr;
+HitFbFn    g_origHitFeedback  = nullptr;
+
+constexpr std::size_t   kMaxDeferredDmg     = 2048;
+constexpr std::size_t   kMaxDeferredVfx     = 2048;
+constexpr std::size_t   kMaxDeferredShakes  = 128;
+constexpr std::size_t   kCMhEfcParamSize    = 0xF0;
+constexpr std::size_t   kShakeParamSize     = 0xD0;
+constexpr std::uint16_t kVfxPoolSafeLimit   = 220; // engine guard is < 280 units on MoveLine[0x13]
+constexpr std::uint32_t kDmgInitialBurst    = 6;
+constexpr std::uint32_t kDmgPerTick         = 4;
+constexpr std::uint32_t kVfxPerTick         = 6;
+constexpr int           kShakeIntervalTicks = 4;
+constexpr int           kBurstTimeoutTicks  = 1800; // ~30 s @ 60 fps, then abandon leftovers
+constexpr int           kPunchFrames        = 16;
+constexpr std::uint32_t kHitWeightCap       = 128;
+
+struct DmgRec {
+    std::uintptr_t gui;
+    std::uintptr_t mon;
+    std::int32_t   dmg;
+    std::uint32_t  a[5];
+    std::uint8_t   b[2];
+    std::uint8_t   kind; // 0 = ShowDamageNumber, 1 = Zorah, 2 = Ex
+    std::uint8_t   hasPos;
+    float          pos[4];
+    std::uint8_t   hasMonPos;
+    float          monPosAtHit[3];
+};
+
+struct VfxRec {
+    std::uintptr_t epv;
+    std::int32_t   elemIdx;
+    std::int32_t   efxIdx;
+    std::uintptr_t mon;
+    std::uint8_t   hasMonPos;
+    float          monPosAtHit[3];
+    alignas(8) std::uint8_t efcp[kCMhEfcParamSize];
+};
+
+struct ShakeRec {
+    std::uintptr_t cam;
+    std::uint32_t  extra;
+    std::uint8_t   kind; // 1 = addShake1, 2 = addShake2
+    std::uint8_t   hasPos;
+    float          pos[4];
+    std::uint8_t   param[kShakeParamSize];
+};
+
+std::atomic_flag g_burstLock = ATOMIC_FLAG_INIT;
+
+struct BurstLockGuard {
+    BurstLockGuard() { while (g_burstLock.test_and_set(std::memory_order_acquire)) YieldProcessor(); }
+    ~BurstLockGuard() { g_burstLock.clear(std::memory_order_release); }
+    BurstLockGuard(const BurstLockGuard&) = delete;
+    BurstLockGuard& operator=(const BurstLockGuard&) = delete;
+};
+
+DmgRec        g_dmgQ[kMaxDeferredDmg];
+std::uint32_t g_dmgHead  = 0;
+std::uint32_t g_dmgCount = 0;
+std::atomic<std::uint32_t> g_dmgQueued{0};
+
+VfxRec        g_vfxQ[kMaxDeferredVfx];
+std::uint32_t g_vfxHead          = 0;
+std::uint32_t g_vfxCount         = 0;
+std::uint32_t g_vfxTotalCaptured = 0;
+
+ShakeRec      g_shakeQ[kMaxDeferredShakes];
+std::uint32_t g_shakeCount = 0;
+
+std::uint32_t g_hitWeight  = 0;
+std::int32_t  g_hitMaxTier = 0;
+
+// Sim-thread-only replay state
+int   g_drainTicks = 0;
+int   g_punchLeft  = 0;
+float g_punchAmp   = 0.0f;
+
+inline bool BurstCaptureActive() {
+    return g_burstEnabled.load(std::memory_order_relaxed) &&
+           g_worldFrozen.load(std::memory_order_relaxed) &&
+           !g_frozen.load(std::memory_order_relaxed);
+}
+
+void ResetBurstStateLocked() {
+    g_dmgHead = g_dmgCount = 0;
+    g_dmgQueued.store(0, std::memory_order_relaxed);
+    g_vfxHead = g_vfxCount = g_vfxTotalCaptured = 0;
+    g_shakeCount = 0;
+    g_hitWeight = 0;
+    g_hitMaxTier = 0;
+    g_drainTicks = 0;
+    g_punchLeft = 0;
+    g_punchAmp = 0.0f;
+}
+
+bool BurstHasAnythingLocked() {
+    return g_dmgCount != 0 || g_vfxCount != 0 || g_shakeCount != 0 || g_hitWeight != 0 || g_punchLeft != 0;
+}
+
+inline std::int32_t ShakePriority(const ShakeRec& r) {
+    std::int32_t p = 0;
+    std::memcpy(&p, r.param + 0x10, sizeof(p));
+    return p;
+}
+
+inline float ShakeAmpSq(const ShakeRec& r) {
+    float a[3]{};
+    std::memcpy(a, r.param + 0x30, sizeof(a));
+    const float s = a[0] * a[0] + a[1] * a[1] + a[2] * a[2];
+    return std::isfinite(s) ? s : 0.0f;
+}
+
+inline bool ShakeIsStronger(const ShakeRec& cand, const ShakeRec& cur) {
+    const std::int32_t pCand = ShakePriority(cand);
+    const std::int32_t pCur  = ShakePriority(cur);
+    if (pCand != pCur) return pCand < pCur;
+    return ShakeAmpSq(cand) > ShakeAmpSq(cur);
+}
+
+inline bool HasVfxSound(const VfxRec& r) {
+    std::uintptr_t sp = 0;
+    std::memcpy(&sp, r.efcp + 0xE0, sizeof(sp));
+    return sp != 0;
+}
+
+// ---- POD-only SEH helpers (MSVC C2712: no C++ destructors in __try frames) ----
+
+bool CopyBytesSEH(void* dst, const void* src, std::size_t n) {
+    __try {
+        std::memcpy(dst, src, n);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+bool ReadUnitPosSEH(std::uintptr_t unit, float outPos[3]) {
+    __try {
+        if (!IsAlignedPtr(unit)) return false;
+        const std::uint8_t alive = *reinterpret_cast<const std::uint8_t*>(unit + mhw::kOffUnitAliveFlags);
+        if ((alive & 0x0EU) == 0) return false;
+        const auto* p = reinterpret_cast<const float*>(unit + mhw::kOffUCoordPos);
+        if (!std::isfinite(p[0]) || !std::isfinite(p[1]) || !std::isfinite(p[2])) return false;
+        outPos[0] = p[0];
+        outPos[1] = p[1];
+        outPos[2] = p[2];
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+std::uint32_t CountFreeHudSlotsSEH(std::uintptr_t gui) {
+    __try {
+        if (gui < 0x10000ULL) return 0;
+        const std::uintptr_t hud = *reinterpret_cast<const std::uintptr_t*>(gui + mhw::kOffSMhGuiHudDamage);
+        if (hud < 0x10000ULL) return 0;
+        std::uint32_t freeCnt = 0;
+        for (std::size_t i = 0; i < mhw::kHudDmgSlotCount; ++i) {
+            const std::uint8_t active =
+                *reinterpret_cast<const std::uint8_t*>(hud + mhw::kOffHudDmgActive + i * mhw::kHudDmgSlotStride);
+            if (active == 0) ++freeCnt;
+        }
+        return freeCnt;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
+}
+
+bool ReplayDmgSEH(const DmgRec& r) {
+    __try {
+        float adjPos[4]{r.pos[0], r.pos[1], r.pos[2], r.pos[3]};
+        if (r.hasPos && r.hasMonPos && IsAlignedPtr(r.mon)) {
+            float curMon[3]{};
+            if (ReadUnitPosSEH(r.mon, curMon)) {
+                const float dx = curMon[0] - r.monPosAtHit[0];
+                const float dy = curMon[1] - r.monPosAtHit[1];
+                const float dz = curMon[2] - r.monPosAtHit[2];
+                const float d2 = dx * dx + dy * dy + dz * dz;
+                if (std::isfinite(d2) && d2 < (1500.0f * 1500.0f)) {
+                    adjPos[0] += dx;
+                    adjPos[1] += dy;
+                    adjPos[2] += dz;
+                }
+            }
+        }
+        const float* pos = r.hasPos ? adjPos : nullptr;
+        if (r.kind == 0 && g_origDmgNum) {
+            g_origDmgNum(r.gui, r.mon, r.dmg, pos, r.a[0], r.a[1], r.a[2],
+                         static_cast<std::int32_t>(r.a[3]), r.b[0]);
+        } else if (r.kind == 1 && g_origDmgNumZorah) {
+            g_origDmgNumZorah(r.gui, r.mon, r.dmg, pos, r.a[0], r.a[1], r.a[2],
+                              static_cast<std::int32_t>(r.a[3]), r.b[0]);
+        } else if (r.kind == 2 && g_origDmgNumEx) {
+            g_origDmgNumEx(r.gui, r.mon, r.dmg, pos, r.a[0], r.a[1], r.a[2], r.b[0], r.a[3], r.a[4], r.b[1]);
+        }
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+bool CaptureVfxSEH(long long* ctx, std::uintptr_t epv, std::int32_t elemIdx, std::int32_t efxIdx,
+                   std::uintptr_t efcp, VfxRec& out, std::uintptr_t& outSoundParam) {
+    outSoundParam = 0;
+    __try {
+        if (!ctx || !IsAlignedPtr(epv) || !IsAlignedPtr(efcp)) return false;
+        const std::uintptr_t dmgChk = static_cast<std::uintptr_t>(ctx[0]);
+        if (!IsAlignedPtr(dmgChk)) return false;
+        const std::uintptr_t mon = *reinterpret_cast<const std::uintptr_t*>(dmgChk + 8);
+        if (!IsAlignedPtr(mon)) return false;
+
+        std::memcpy(out.efcp, reinterpret_cast<const void*>(efcp), kCMhEfcParamSize);
+        std::memcpy(&outSoundParam, out.efcp + 0xE0, sizeof(outSoundParam));
+        out.epv     = epv;
+        out.elemIdx = elemIdx;
+        out.efxIdx  = efxIdx;
+        out.mon     = mon;
+        out.hasMonPos = ReadUnitPosSEH(mon, out.monPosAtHit) ? 1 : 0;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+void PlayEpvSoundImmediateSEH(std::uintptr_t exeBase, std::uintptr_t epv, std::int32_t elemIdx,
+                              std::int32_t efxIdx, std::uintptr_t monster, std::uintptr_t soundParam) {
+    __try {
+        if (!exeBase || !IsAlignedPtr(epv) || !IsAlignedPtr(monster) || !IsAlignedPtr(soundParam)) return;
+        const auto fnGetElem = reinterpret_cast<EpvGetElemFn>(exeBase + mhw::kRvaEpvGetEffectElement);
+        const std::uintptr_t epvElem = fnGetElem(epv, elemIdx, efxIdx);
+        if (!IsAlignedPtr(epvElem)) return;
+
+        const std::uint16_t cat   = *reinterpret_cast<const std::uint16_t*>(epvElem + 0x2B2);
+        const std::uint16_t subId = *reinterpret_cast<const std::uint16_t*>(epvElem + 0x2B0);
+        const std::uintptr_t epvSoundRes = *reinterpret_cast<const std::uintptr_t*>(soundParam);
+        if (!IsAlignedPtr(epvSoundRes)) return;
+
+        const std::uint32_t count = *reinterpret_cast<const std::uint32_t*>(epvSoundRes + 0xC0);
+        const std::uintptr_t arr  = *reinterpret_cast<const std::uintptr_t*>(epvSoundRes + 0xD0);
+        if (count == 0 || count > 4096 || !IsAlignedPtr(arr)) return;
+
+        const auto* vZero  = reinterpret_cast<const float*>(exeBase + mhw::kRvaConstVec3Zero);
+        const auto* vUnitZ = reinterpret_cast<const float*>(exeBase + mhw::kRvaConstVec3UnitZ);
+        const auto fnCallById = reinterpret_cast<WwiseCallByIdFn>(exeBase + mhw::kRvaWwiseCallEventById);
+
+        for (std::uint32_t i = 0; i < count; ++i) {
+            const std::uintptr_t entry = *reinterpret_cast<const std::uintptr_t*>(arr + i * 8);
+            if (!IsAlignedPtr(entry)) continue;
+            const std::int32_t evId = *reinterpret_cast<const std::int32_t*>(entry + 0x0C);
+            if (evId == -1) continue;
+            if (*reinterpret_cast<const std::uint32_t*>(entry + 0x14) != cat) continue;
+            if (*reinterpret_cast<const std::uint32_t*>(entry + 0x18) != subId) continue;
+
+            const std::uint32_t bankId = *reinterpret_cast<const std::uint32_t*>(entry + 0x08);
+            alignas(16) std::uint8_t wwiseParam[0x88]{};
+            std::memcpy(wwiseParam + 0x00, vZero, 12);
+            std::memcpy(wwiseParam + 0x10, vUnitZ, 12);
+            std::memcpy(wwiseParam + 0x20, vZero, 12);
+            std::memcpy(wwiseParam + 0x30, &monster, sizeof(monster));
+            const std::uint64_t flags = 0x10ULL;
+            std::memcpy(wwiseParam + 0x80, &flags, sizeof(flags));
+            fnCallById(soundParam + 8, monster, bankId, static_cast<std::uint32_t>(evId), wwiseParam);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
+bool ReplayVfxSEH(std::uintptr_t exeBase, const VfxRec& r, bool allowBurstSound) {
+    __try {
+        if (!exeBase || !IsAlignedPtr(r.epv) || !IsAlignedPtr(r.mon)) return false;
+        const std::uint8_t alive = *reinterpret_cast<const std::uint8_t*>(r.mon + mhw::kOffUnitAliveFlags);
+        if ((alive & 0x0EU) == 0) return false;
+
+        const std::uintptr_t sMhEffect = *reinterpret_cast<const std::uintptr_t*>(exeBase + mhw::kRvaSMhEffectInstance);
+        if (!IsAlignedPtr(sMhEffect)) return false;
+        const std::uintptr_t vft = *reinterpret_cast<const std::uintptr_t*>(sMhEffect);
+        if (!IsAlignedPtr(vft)) return false;
+        const auto fnCreate = *reinterpret_cast<const SMhEffectCreateFn*>(vft + mhw::kOffSMhEffectCreateVft);
+        if (!fnCreate) return false;
+
+        alignas(16) std::uint8_t efcpCopy[kCMhEfcParamSize];
+        std::memcpy(efcpCopy, r.efcp, kCMhEfcParamSize);
+        const std::uintptr_t paramVft = exeBase + mhw::kRvaCMhEfcParamVft;
+        std::memcpy(efcpCopy + 0x00, &paramVft, sizeof(paramVft));
+
+        std::int32_t jntId = -1;
+        std::memcpy(&jntId, efcpCopy + 0x60, sizeof(jntId));
+        if (jntId < 0 && r.hasMonPos) {
+            float curMon[3]{};
+            if (ReadUnitPosSEH(r.mon, curMon)) {
+                const float dx = curMon[0] - r.monPosAtHit[0];
+                const float dy = curMon[1] - r.monPosAtHit[1];
+                const float dz = curMon[2] - r.monPosAtHit[2];
+                const float d2 = dx * dx + dy * dy + dz * dz;
+                if (std::isfinite(d2) && d2 < (1500.0f * 1500.0f)) {
+                    float pos[3]{};
+                    std::memcpy(pos, efcpCopy + 0x10, sizeof(pos));
+                    pos[0] += dx;
+                    pos[1] += dy;
+                    pos[2] += dz;
+                    std::memcpy(efcpCopy + 0x10, pos, sizeof(pos));
+                }
+            }
+        }
+
+        if (!allowBurstSound) {
+            const std::uintptr_t zeroPtr = 0;
+            std::memcpy(efcpCopy + 0xE0, &zeroPtr, sizeof(zeroPtr));
+        }
+
+        fnCreate(sMhEffect, exeBase + mhw::kRvaUMhEffectDti, r.epv, r.elemIdx, r.efxIdx, efcpCopy, r.mon, 0ULL);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+bool ReplayShakeSEH(const ShakeRec& r) {
+    __try {
+        const float* pos = r.hasPos ? r.pos : nullptr;
+        if (r.kind == 1 && g_origShake1) {
+            g_origShake1(r.cam, r.param, pos);
+        } else if (r.kind == 2 && g_origShake2) {
+            g_origShake2(r.cam, r.param, r.extra, pos);
+        }
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+std::uint16_t HitEfcPoolCountSEH() {
+    __try {
+        const std::uintptr_t base = g_exeBase;
+        if (!base) return 0xFFFFu;
+        const std::uintptr_t unitSys = *reinterpret_cast<const std::uintptr_t*>(base + mhw::kRvaSMhUnitInstance);
+        if (unitSys < 0x10000ULL) return 0xFFFFu;
+        return *reinterpret_cast<const std::uint16_t*>(unitSys + mhw::kOffMoveLine13UnitNum);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0xFFFFu;
+    }
+}
+
+bool ApplyFovPunchSEH(std::uintptr_t exeBase, float scale) {
+    __try {
+        const std::uintptr_t cam = GetActiveCameraUnit(exeBase);
+        if (!IsAlignedPtr(cam)) return false;
+        const float baseFov = *reinterpret_cast<const float*>(cam + mhw::kOffCamVerticalFov);
+        if (!(baseFov > 0.05f) || !(baseFov < 200.0f)) return false;
+        *reinterpret_cast<float*>(cam + mhw::kOffCamFovOverride) = baseFov * scale;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+// ---- Queue helpers (take lock, no SEH) ----
+
+void PushDmg(const DmgRec& r) {
+    BurstLockGuard lk;
+    if (g_dmgCount >= kMaxDeferredDmg) return;
+    g_dmgQ[(g_dmgHead + g_dmgCount) % kMaxDeferredDmg] = r;
+    ++g_dmgCount;
+    g_dmgQueued.store(g_dmgCount, std::memory_order_relaxed);
+}
+
+bool PeekPopDmg(DmgRec& out, bool pop) {
+    BurstLockGuard lk;
+    if (g_dmgCount == 0) return false;
+    out = g_dmgQ[g_dmgHead];
+    if (pop) {
+        g_dmgHead = (g_dmgHead + 1) % kMaxDeferredDmg;
+        --g_dmgCount;
+        g_dmgQueued.store(g_dmgCount, std::memory_order_relaxed);
+    }
+    return true;
+}
+
+void PushVfx(const VfxRec& r) {
+    BurstLockGuard lk;
+    if (g_vfxCount >= kMaxDeferredVfx) return;
+    g_vfxQ[(g_vfxHead + g_vfxCount) % kMaxDeferredVfx] = r;
+    ++g_vfxCount;
+    ++g_vfxTotalCaptured;
+}
+
+bool PopVfx(VfxRec& out) {
+    BurstLockGuard lk;
+    if (g_vfxCount == 0) return false;
+    out = g_vfxQ[g_vfxHead];
+    g_vfxHead = (g_vfxHead + 1) % kMaxDeferredVfx;
+    --g_vfxCount;
+    return true;
+}
+
+void PushShake(const ShakeRec& r) {
+    BurstLockGuard lk;
+    if (g_shakeCount < kMaxDeferredShakes) {
+        g_shakeQ[g_shakeCount++] = r;
+        return;
+    }
+    std::uint32_t weak = 0;
+    for (std::uint32_t i = 1; i < g_shakeCount; ++i) {
+        if (ShakeIsStronger(g_shakeQ[weak], g_shakeQ[i])) weak = i;
+    }
+    if (ShakeIsStronger(r, g_shakeQ[weak])) {
+        g_shakeQ[weak] = r;
+    }
+}
+
+bool PopBestShake(ShakeRec& out) {
+    BurstLockGuard lk;
+    if (g_shakeCount == 0) return false;
+    std::uint32_t best = 0;
+    for (std::uint32_t i = 1; i < g_shakeCount; ++i) {
+        if (ShakeIsStronger(g_shakeQ[i], g_shakeQ[best])) best = i;
+    }
+    out = g_shakeQ[best];
+    g_shakeQ[best] = g_shakeQ[--g_shakeCount];
+    return true;
+}
+
+void CaptureDmg(std::uint8_t kind, std::uintptr_t gui, std::uintptr_t mon, std::int32_t dmg, const float* pos,
+                std::uint32_t a0, std::uint32_t a1, std::uint32_t a2, std::uint32_t a3, std::uint32_t a4,
+                std::uint8_t b0, std::uint8_t b1) {
+    DmgRec r{};
+    r.gui = gui; r.mon = mon; r.dmg = dmg; r.kind = kind;
+    r.a[0] = a0; r.a[1] = a1; r.a[2] = a2; r.a[3] = a3; r.a[4] = a4;
+    r.b[0] = b0; r.b[1] = b1;
+    r.hasPos = (pos != nullptr && CopyBytesSEH(r.pos, pos, sizeof(r.pos))) ? 1 : 0;
+    r.hasMonPos = ReadUnitPosSEH(mon, r.monPosAtHit) ? 1 : 0;
+    PushDmg(r);
+}
+
+void CaptureShake(std::uint8_t kind, std::uintptr_t cam, const void* param, std::uint32_t extra, const float* pos) {
+    if (!param) return;
+    ShakeRec r{};
+    r.cam = cam; r.kind = kind; r.extra = extra;
+    if (!CopyBytesSEH(r.param, param, kShakeParamSize)) return;
+    r.hasPos = (pos != nullptr && CopyBytesSEH(r.pos, pos, sizeof(r.pos))) ? 1 : 0;
+    PushShake(r);
+}
+
+} // namespace
+
+void SetOrigBurstHook(int which, void* origFn) {
+    switch (which) {
+        case 0: g_origDmgNum      = reinterpret_cast<DmgNumFn>(origFn);   break;
+        case 1: g_origDmgNumZorah = reinterpret_cast<DmgNumFn>(origFn);   break;
+        case 2: g_origDmgNumEx    = reinterpret_cast<DmgNumExFn>(origFn); break;
+        case 3: g_origHitEfc      = reinterpret_cast<HitEfcFn>(origFn);   break;
+        case 4: g_origShake1      = reinterpret_cast<Shake1Fn>(origFn);   break;
+        case 5: g_origShake2      = reinterpret_cast<Shake2Fn>(origFn);   break;
+        case 6: g_origHitFeedback = reinterpret_cast<HitFbFn>(origFn);    break;
+        default: break;
+    }
+}
+
+void __fastcall Hook_BurstDmgNum(std::uintptr_t gui, std::uintptr_t mon, std::int32_t dmg, const float* pos,
+                                 std::uint32_t color, std::uint32_t crit, std::uint32_t buff,
+                                 std::int32_t p8, std::uint8_t p9) {
+    if (BurstCaptureActive()) {
+        CaptureDmg(0, gui, mon, dmg, pos, color, crit, buff, static_cast<std::uint32_t>(p8), 0, p9, 0);
+        return;
+    }
+    if (g_origDmgNum) g_origDmgNum(gui, mon, dmg, pos, color, crit, buff, p8, p9);
+}
+
+void __fastcall Hook_BurstDmgNumZorah(std::uintptr_t gui, std::uintptr_t mon, std::int32_t dmg, const float* pos,
+                                      std::uint32_t color, std::uint32_t crit, std::uint32_t buff,
+                                      std::int32_t p8, std::uint8_t p9) {
+    if (BurstCaptureActive()) {
+        CaptureDmg(1, gui, mon, dmg, pos, color, crit, buff, static_cast<std::uint32_t>(p8), 0, p9, 0);
+        return;
+    }
+    if (g_origDmgNumZorah) g_origDmgNumZorah(gui, mon, dmg, pos, color, crit, buff, p8, p9);
+}
+
+void __fastcall Hook_BurstDmgNumEx(std::uintptr_t gui, std::uintptr_t mon, std::int32_t dmg, const float* pos,
+                                   std::uint32_t p5, std::uint32_t p6, std::uint32_t p7, std::uint8_t p8,
+                                   std::uint32_t p9, std::uint32_t p10, std::uint8_t p11) {
+    if (BurstCaptureActive()) {
+        CaptureDmg(2, gui, mon, dmg, pos, p5, p6, p7, p9, p10, p8, p11);
+        return;
+    }
+    if (g_origDmgNumEx) g_origDmgNumEx(gui, mon, dmg, pos, p5, p6, p7, p8, p9, p10, p11);
+}
+
+void __fastcall Hook_BurstHitEfc(long long* ctx, std::uintptr_t epv, std::int32_t elemIdx,
+                                 std::int32_t efxIdx, std::uintptr_t efcp) {
+    if (BurstCaptureActive()) {
+        VfxRec rec{};
+        std::uintptr_t soundParam = 0;
+        if (CaptureVfxSEH(ctx, epv, elemIdx, efxIdx, efcp, rec, soundParam)) {
+            PushVfx(rec);
+            if (HitEfcPoolCountSEH() >= kVfxPoolSafeLimit) {
+                PlayEpvSoundImmediateSEH(g_exeBase, epv, elemIdx, efxIdx, rec.mon, soundParam);
+                return;
+            }
+        }
+    }
+    if (g_origHitEfc) g_origHitEfc(ctx, epv, elemIdx, efxIdx, efcp);
+}
+
+std::int32_t __fastcall Hook_BurstShake1(std::uintptr_t cam, const void* param, const float* pos) {
+    if (BurstCaptureActive()) {
+        CaptureShake(1, cam, param, 0, pos);
+    }
+    return g_origShake1 ? g_origShake1(cam, param, pos) : -1;
+}
+
+std::int32_t __fastcall Hook_BurstShake2(std::uintptr_t cam, const void* param, std::uint32_t extra, const float* pos) {
+    if (BurstCaptureActive()) {
+        CaptureShake(2, cam, param, extra, pos);
+    }
+    return g_origShake2 ? g_origShake2(cam, param, extra, pos) : -1;
+}
+
+void __fastcall Hook_BurstHitFeedback(std::uintptr_t player, std::uintptr_t hitInfo, std::int32_t tier) {
+    if (g_origHitFeedback) g_origHitFeedback(player, hitInfo, tier);
+    if (BurstCaptureActive()) {
+        BurstLockGuard lk;
+        if (g_hitWeight < kHitWeightCap) ++g_hitWeight;
+        if (tier > g_hitMaxTier) g_hitMaxTier = tier;
+    }
+}
+
+void SetWorldFreezeBurst(bool enabled) {
+    g_burstEnabled.store(enabled, std::memory_order_release);
+    RefreshUnitMoveFlags();
+    app::Log("freeze: World Freeze Delayed Burst = %s", enabled ? "ON" : "OFF");
+}
+
+bool ToggleWorldFreezeBurst() {
+    const bool next = !g_burstEnabled.load(std::memory_order_relaxed);
+    SetWorldFreezeBurst(next);
+    return next;
+}
+
+bool IsWorldFreezeBurstEnabled() {
+    return g_burstEnabled.load(std::memory_order_relaxed);
+}
+
+std::uint32_t BurstDeferredCount() {
+    return g_dmgQueued.load(std::memory_order_relaxed);
+}
+
+void BurstBeginSession() {
+    {
+        BurstLockGuard lk;
+        ResetBurstStateLocked();
+    }
+    g_burstDrainPending.store(false, std::memory_order_release);
+}
+
+void BurstOnWorldResume() {
+    bool any = false;
+    std::uint32_t dmgCnt = 0, vfxCnt = 0, shakeCnt = 0, weight = 0;
+    {
+        BurstLockGuard lk;
+        any = BurstHasAnythingLocked();
+        if (any) {
+            g_drainTicks = 0;
+            if (g_hitWeight != 0) {
+                const std::uint32_t w = g_hitWeight < 10u ? g_hitWeight : 10u;
+                const float tierBonus = (g_hitMaxTier >= 2) ? 0.02f : 0.0f;
+                g_punchAmp = 0.04f + 0.008f * static_cast<float>(w) + tierBonus; // 4% .. 14%
+                if (g_punchAmp > 0.14f) g_punchAmp = 0.14f;
+                g_punchLeft = kPunchFrames;
+            }
+            dmgCnt = g_dmgCount;
+            vfxCnt = g_vfxCount;
+            shakeCnt = g_shakeCount;
+            weight = g_hitWeight;
+        }
+    }
+    g_burstDrainPending.store(any, std::memory_order_release);
+    if (any) {
+        app::Log("burst: World Freeze resumed -> replaying %u damage number(s), %u hit VFX, %u shake(s), hit weight %u",
+                 dmgCnt, vfxCnt, shakeCnt, weight);
+    }
+}
+
+void BurstAbort() {
+    {
+        BurstLockGuard lk;
+        ResetBurstStateLocked();
+    }
+    g_burstDrainPending.store(false, std::memory_order_release);
+    RefreshUnitMoveFlags();
+}
+
+void BurstDrainTick(std::uintptr_t exeBase) {
+    if (!g_burstDrainPending.load(std::memory_order_acquire)) return;
+    ++g_drainTicks;
+
+    // 1. Damage numbers: paced replay while 20-slot HUD pool has free slots
+    DmgRec front{};
+    if (PeekPopDmg(front, false)) {
+        const std::uint32_t maxDmg = (g_drainTicks == 1) ? kDmgInitialBurst : kDmgPerTick;
+        const std::uint32_t freeSlots = CountFreeHudSlotsSEH(front.gui);
+        std::uint32_t emitted = 0;
+        while (emitted < maxDmg && emitted < freeSlots) {
+            DmgRec r{};
+            if (!PeekPopDmg(r, true)) break;
+            ReplayDmgSEH(r);
+            ++emitted;
+        }
+    }
+
+    // 2. Hit VFX: paced replay under MoveLine[0x13] pool guard with non-clipping cascading sound
+    if (HitEfcPoolCountSEH() < kVfxPoolSafeLimit) {
+        bool frameSoundPlayed = false;
+        for (std::uint32_t emitted = 0; emitted < kVfxPerTick; ++emitted) {
+            VfxRec r{};
+            if (!PopVfx(r)) break;
+            bool allowSound = false;
+            if (!frameSoundPlayed && HasVfxSound(r)) {
+                if ((r.elemIdx >= 0x7D0 && r.elemIdx <= 0x7DB) || (((g_drainTicks & 1) == 1) && emitted == 0)) {
+                    allowSound = true;
+                    frameSoundPlayed = true;
+                }
+            }
+            ReplayVfxSEH(exeBase, r, allowSound);
+        }
+    }
+
+    // 3. Camera shakes: prioritized cascading replay synchronized with visual burst
+    std::uint32_t dmgRem = 0, vfxRem = 0;
+    {
+        BurstLockGuard lk;
+        dmgRem = g_dmgCount;
+        vfxRem = g_vfxCount;
+    }
+    if (g_drainTicks == 1 || ((g_drainTicks % kShakeIntervalTicks) == 0 && (dmgRem > 0 || vfxRem > 0))) {
+        ShakeRec s{};
+        if (PopBestShake(s)) {
+            ReplayShakeSEH(s);
+        }
+    }
+
+    // 4. FOV punch: 2-frame snap-in + 14-frame cubic ease-out
+    if (g_punchLeft > 0) {
+        const int elapsed = kPunchFrames - g_punchLeft;
+        float env = 0.0f;
+        if (elapsed == 0) env = 0.65f;
+        else if (elapsed == 1) env = 1.0f;
+        else {
+            const float t = static_cast<float>(g_punchLeft) / static_cast<float>(kPunchFrames - 2);
+            env = t * t * t;
+        }
+        ApplyFovPunchSEH(exeBase, 1.0f - g_punchAmp * env);
+        --g_punchLeft;
+    }
+
+    bool done = false;
+    {
+        BurstLockGuard lk;
+        done = (g_dmgCount == 0 && g_vfxCount == 0 && g_punchLeft == 0) || g_drainTicks > kBurstTimeoutTicks;
+        if (done) ResetBurstStateLocked();
+    }
+    if (done) {
+        g_burstDrainPending.store(false, std::memory_order_release);
+        RefreshUnitMoveFlags();
+        app::Log("burst: replay finished");
+    }
 }
 
 } // namespace freeze

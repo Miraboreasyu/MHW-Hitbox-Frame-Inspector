@@ -337,6 +337,20 @@ struct RawSnapshot {
     float view[16];
     float proj[16];
     float camPos[3];
+    bool hasDisplayRect;
+    std::int32_t renderBbW;
+    std::int32_t renderBbH;
+    std::int32_t dispLeft;
+    std::int32_t dispTop;
+    std::int32_t dispRight;
+    std::int32_t dispBottom;
+    std::int32_t sceneW;
+    std::int32_t sceneH;
+    bool hasVpRegion;
+    std::int32_t vpLeft;
+    std::int32_t vpTop;
+    std::int32_t vpRight;
+    std::int32_t vpBottom;
     bool hasPlayerGround;
     float plFeetPos[3];
     float plForward[3];
@@ -3112,6 +3126,20 @@ void CollectSnapshotSEH(std::uintptr_t exeBase,
     const std::uint32_t    visMask = viewState.visMask;
     const app::SbcMeshTier sbcTier = viewState.sbcTier;
     outSnap->hasCamera       = false;
+    outSnap->hasDisplayRect  = false;
+    outSnap->renderBbW       = 0;
+    outSnap->renderBbH       = 0;
+    outSnap->dispLeft        = 0;
+    outSnap->dispTop         = 0;
+    outSnap->dispRight       = 0;
+    outSnap->dispBottom      = 0;
+    outSnap->sceneW          = 0;
+    outSnap->sceneH          = 0;
+    outSnap->hasVpRegion     = false;
+    outSnap->vpLeft          = 0;
+    outSnap->vpTop           = 0;
+    outSnap->vpRight         = 0;
+    outSnap->vpBottom        = 0;
     outSnap->hasPlayerGround = false;
     outSnap->shapeCount      = 0;
     outSnap->sbcTriCount     = 0;
@@ -3122,13 +3150,34 @@ void CollectSnapshotSEH(std::uintptr_t exeBase,
     g_emInspector            = EmInspectorSnapshot{};
 
     __try {
-        // Read sMhRender HDR state even when only drawing the 2D HUD banner / panel
+        // Read sMhRender HDR state + active 16:9 / 21:9 BackBuffer display sub-rect (0x14229f090 / 0x1422979f0)
+        // even when only drawing the 2D HUD banner / Freeze alert / [P] panel!
         const std::uintptr_t mhRender = *reinterpret_cast<const std::uintptr_t*>(exeBase + mhw::kRvaSMhRenderInstance);
         if (IsAlignedPtr(mhRender)) {
             outSnap->hdrActive = (*reinterpret_cast<const std::uint8_t*>(mhRender + mhw::kOffRenderHdrOutput) != 0);
             const float whiteNits = *reinterpret_cast<const float*>(mhRender + mhw::kOffRenderHdrWhiteNits);
             if (std::isfinite(whiteNits) && whiteNits >= 50.0f && whiteNits <= 2000.0f) {
                 outSnap->hdrWhiteNits = whiteNits;
+            }
+            const std::int32_t bbW = *reinterpret_cast<const std::int32_t*>(mhRender + mhw::kOffRenderBackBufW);
+            const std::int32_t bbH = *reinterpret_cast<const std::int32_t*>(mhRender + mhw::kOffRenderBackBufH);
+            const std::int32_t dL  = *reinterpret_cast<const std::int32_t*>(mhRender + mhw::kOffRenderDispLeft);
+            const std::int32_t dT  = *reinterpret_cast<const std::int32_t*>(mhRender + mhw::kOffRenderDispTop);
+            const std::int32_t dR  = *reinterpret_cast<const std::int32_t*>(mhRender + mhw::kOffRenderDispRight);
+            const std::int32_t dB  = *reinterpret_cast<const std::int32_t*>(mhRender + mhw::kOffRenderDispBottom);
+            const std::int32_t scW = *reinterpret_cast<const std::int32_t*>(mhRender + mhw::kOffRenderSceneWidth);
+            const std::int32_t scH = *reinterpret_cast<const std::int32_t*>(mhRender + mhw::kOffRenderSceneHeight);
+            if (bbW >= 64 && bbW <= 32768 && bbH >= 64 && bbH <= 32768 &&
+                dR > dL && dB > dT && dL >= -2 && dT >= -2 && dR <= bbW + 2 && dB <= bbH + 2) {
+                outSnap->hasDisplayRect = true;
+                outSnap->renderBbW      = bbW;
+                outSnap->renderBbH      = bbH;
+                outSnap->dispLeft       = dL;
+                outSnap->dispTop        = dT;
+                outSnap->dispRight      = dR;
+                outSnap->dispBottom     = dB;
+                outSnap->sceneW         = scW;
+                outSnap->sceneH         = scH;
             }
         }
 
@@ -3209,6 +3258,15 @@ void CollectSnapshotSEH(std::uintptr_t exeBase,
                     } else {
                         std::memcpy(outSnap->view, reinterpret_cast<const void*>(vp + mhw::kOffVpViewMat), 64);
                         std::memcpy(outSnap->proj, reinterpret_cast<const void*>(vp + mhw::kOffVpProjMat), 64);
+                    }
+                    const auto* vpReg = reinterpret_cast<const std::int32_t*>(vp + mhw::kOffVpRegion);
+                    if (vpReg[2] > vpReg[0] && vpReg[3] > vpReg[1] &&
+                        vpReg[0] >= 0 && vpReg[1] >= 0 && vpReg[2] <= 32768 && vpReg[3] <= 32768) {
+                        outSnap->hasVpRegion = true;
+                        outSnap->vpLeft      = vpReg[0];
+                        outSnap->vpTop       = vpReg[1];
+                        outSnap->vpRight     = vpReg[2];
+                        outSnap->vpBottom    = vpReg[3];
                     }
                     const float* vm = outSnap->view;
                     outSnap->camPos[0] = -(vm[12] * vm[0] + vm[13] * vm[1] + vm[14] * vm[2]);
@@ -3512,14 +3570,42 @@ struct ClipVert4 {
 struct LineProjector {
     float vp[16]{};
     float camPos[3]{};
-    float screenW = 1920.0f;
-    float screenH = 1080.0f;
-    float invW2   = 2.0f / 1920.0f;
-    float invH2   = 2.0f / 1080.0f;
-    float projM22 = 0.0f;
-    float zBiasCm = 0.0f; // Distance-invariant camera-ward depth bias in world cm
+    float fullW     = 1920.0f;
+    float fullH     = 1080.0f;
+    float invFullW2 = 2.0f / 1920.0f;
+    float invFullH2 = 2.0f / 1080.0f;
+    float dispX     = 0.0f;
+    float dispY     = 0.0f;
+    float dispW     = 1920.0f;
+    float dispH     = 1080.0f;
+    float uiAspectX = 1.0f;
+    float uiW       = 1920.0f;
+    float uiH       = 1080.0f;
+    float vpSubX    = 0.0f;
+    float vpSubY    = 0.0f;
+    float vpSubW    = 1920.0f;
+    float vpSubH    = 1080.0f;
+    float ndcScaleX = 1.0f;
+    float ndcBiasX  = 0.0f;
+    float ndcScaleY = 1.0f;
+    float ndcBiasY  = 0.0f;
+    float projM22   = 0.0f;
+    float zBiasCm   = 0.0f; // Distance-invariant camera-ward depth bias in world cm
 
-    void init(const float view[16], const float proj[16], const float cam[3], float w, float h) {
+    void init(const float view[16],
+              const float proj[16],
+              const float cam[3],
+              float fW,
+              float fH,
+              float dX,
+              float dY,
+              float dW,
+              float dH,
+              float vX,
+              float vY,
+              float vW,
+              float vH,
+              float aspectX) {
         for (int r = 0; r < 4; ++r) {
             for (int c = 0; c < 4; ++c) {
                 vp[r * 4 + c] =
@@ -3542,10 +3628,30 @@ struct LineProjector {
             camPos[1] = cam[1];
             camPos[2] = cam[2];
         }
-        screenW = (w > 1.0f) ? w : 1920.0f;
-        screenH = (h > 1.0f) ? h : 1080.0f;
-        invW2 = 2.0f / screenW;
-        invH2 = 2.0f / screenH;
+        fullW     = (fW > 1.0f) ? fW : 1920.0f;
+        fullH     = (fH > 1.0f) ? fH : 1080.0f;
+        invFullW2 = 2.0f / fullW;
+        invFullH2 = 2.0f / fullH;
+
+        dispX     = dX;
+        dispY     = dY;
+        dispW     = (dW > 1.0f) ? dW : fullW;
+        dispH     = (dH > 1.0f) ? dH : fullH;
+        uiAspectX = (aspectX > 0.1f) ? aspectX : 1.0f;
+        uiW       = dispW / uiAspectX;
+        uiH       = dispH;
+
+        const float effVpW = (vW > 1.0f) ? vW : dispW;
+        const float effVpH = (vH > 1.0f) ? vH : dispH;
+        vpSubX    = (vX - dispX) / uiAspectX;
+        vpSubY    = vY - dispY;
+        vpSubW    = effVpW / uiAspectX;
+        vpSubH    = effVpH;
+
+        ndcScaleX = effVpW / fullW;
+        ndcBiasX  = (2.0f * vX + effVpW) / fullW - 1.0f;
+        ndcScaleY = effVpH / fullH;
+        ndcBiasY  = 1.0f - (2.0f * vY + effVpH) / fullH;
     }
 
     float computeNdcZ(float cz, float cw) const noexcept {
@@ -3578,8 +3684,8 @@ struct LineProjector {
         const float ndcX = cx / cw;
         const float ndcY = cy / cw;
         if (ndcX < -1.2f || ndcX > 1.2f || ndcY < -1.2f || ndcY > 1.2f) return false;
-        outSx = (ndcX * 0.5f + 0.5f) * screenW;
-        outSy = (0.5f - ndcY * 0.5f) * screenH;
+        outSx = vpSubX + (ndcX * 0.5f + 0.5f) * vpSubW;
+        outSy = vpSubY + (0.5f - ndcY * 0.5f) * vpSubH;
         if (outZ) {
             *outZ = computeNdcZ(cz, cw);
         }
@@ -3598,10 +3704,12 @@ struct LineProjector {
         const float nx = -dy * invLen * halfThicknessPx;
         const float ny =  dx * invLen * halfThicknessPx;
 
-        auto toNdc = [&](float px, float py, float z) -> OverlayVertex {
+        auto toNdc = [&](float ux, float uy, float z) -> OverlayVertex {
+            const float bx = dispX + ux * uiAspectX;
+            const float by = dispY + uy;
             return {
-                px * invW2 - 1.0f,
-                1.0f - py * invH2,
+                bx * invFullW2 - 1.0f,
+                1.0f - by * invFullH2,
                 z, 1.0f,
                 col.r, col.g, col.b, col.a
             };
@@ -3619,10 +3727,12 @@ struct LineProjector {
     void emitRect2D(std::vector<OverlayVertex>& out,
                     float x0, float y0, float x1, float y1, const Color4& col,
                     float z = 0.0f) const {
-        auto toNdc = [&](float px, float py) -> OverlayVertex {
+        auto toNdc = [&](float ux, float uy) -> OverlayVertex {
+            const float bx = dispX + ux * uiAspectX;
+            const float by = dispY + uy;
             return {
-                px * invW2 - 1.0f,
-                1.0f - py * invH2,
+                bx * invFullW2 - 1.0f,
+                1.0f - by * invFullH2,
                 z, 1.0f,
                 col.r, col.g, col.b, col.a
             };
@@ -3689,9 +3799,9 @@ struct LineProjector {
             const float iw0 = 1.0f / v0.w;
             const float iw1 = 1.0f / v1.w;
             const float iw2 = 1.0f / v2.w;
-            out.push_back({v0.x * iw0, v0.y * iw0, computeNdcZ(v0.z, v0.w), 1.0f, col.r, col.g, col.b, col.a});
-            out.push_back({v1.x * iw1, v1.y * iw1, computeNdcZ(v1.z, v1.w), 1.0f, col.r, col.g, col.b, col.a});
-            out.push_back({v2.x * iw2, v2.y * iw2, computeNdcZ(v2.z, v2.w), 1.0f, col.r, col.g, col.b, col.a});
+            out.push_back({(v0.x * iw0) * ndcScaleX + ndcBiasX, (v0.y * iw0) * ndcScaleY + ndcBiasY, computeNdcZ(v0.z, v0.w), 1.0f, col.r, col.g, col.b, col.a});
+            out.push_back({(v1.x * iw1) * ndcScaleX + ndcBiasX, (v1.y * iw1) * ndcScaleY + ndcBiasY, computeNdcZ(v1.z, v1.w), 1.0f, col.r, col.g, col.b, col.a});
+            out.push_back({(v2.x * iw2) * ndcScaleX + ndcBiasX, (v2.y * iw2) * ndcScaleY + ndcBiasY, computeNdcZ(v2.z, v2.w), 1.0f, col.r, col.g, col.b, col.a});
             return;
         }
 
@@ -3761,7 +3871,7 @@ struct LineProjector {
             if (nx > maxX) maxX = nx;
             if (ny < minY) minY = ny;
             if (ny > maxY) maxY = ny;
-            ndc[i] = {nx, ny, nz, 1.0f, col.r, col.g, col.b, col.a};
+            ndc[i] = {nx * ndcScaleX + ndcBiasX, ny * ndcScaleY + ndcBiasY, nz, 1.0f, col.r, col.g, col.b, col.a};
         }
         if (maxX < -1.05f || minX > 1.05f || maxY < -1.05f || minY > 1.05f) return;
 
@@ -3866,10 +3976,10 @@ struct LineProjector {
             if (effCol.a <= 0.004f) return;
         }
 
-        const float sx0 = (ndcAx * 0.5f + 0.5f) * screenW;
-        const float sy0 = (0.5f - ndcAy * 0.5f) * screenH;
-        const float sx1 = (ndcBx * 0.5f + 0.5f) * screenW;
-        const float sy1 = (0.5f - ndcBy * 0.5f) * screenH;
+        const float sx0 = vpSubX + (ndcAx * 0.5f + 0.5f) * vpSubW;
+        const float sy0 = vpSubY + (0.5f - ndcAy * 0.5f) * vpSubH;
+        const float sx1 = vpSubX + (ndcBx * 0.5f + 0.5f) * vpSubW;
+        const float sy1 = vpSubY + (0.5f - ndcBy * 0.5f) * vpSubH;
 
         const float z0 = computeNdcZ(va.z, awSafe);
         const float z1 = computeNdcZ(vb.z, bwSafe);
@@ -4928,7 +5038,7 @@ void DrawInteractiveFilterPanel(std::vector<OverlayVertex>& outVerts,
         return;
     }
 
-    constexpr int kMainRows = 18;
+    constexpr int kMainRows = 19;
     const float ps     = px * 0.92f;
     const float padX   = 9.0f * resScale;
     const float padY   = 7.0f * resScale;
@@ -4937,7 +5047,7 @@ void DrawInteractiveFilterPanel(std::vector<OverlayVertex>& outVerts,
     const float ftrH   = 10.5f * ps;
     const float sepGap = 5.0f * resScale;
     const float panelW = 60.0f * 6.0f * ps + padX * 2.0f;
-    const float panelH = padY * 2.0f + hdrH + static_cast<float>(kMainRows) * rowH + sepGap * 2.0f + ftrH;
+    const float panelH = padY * 2.0f + hdrH + static_cast<float>(kMainRows) * rowH + sepGap * 3.0f + ftrH;
 
     // Panel background + left accent + top/bottom borders
     proj.emitRect2D(outVerts, x0, y0, x0 + panelW, y0 + panelH,
@@ -4987,7 +5097,8 @@ void DrawInteractiveFilterPanel(std::vector<OverlayVertex>& outVerts,
         {"[.]  SPECIAL SBC LAYERS",    true,  {0.74f, 0.44f, 0.94f, 0.92f}},
         {"[<>] ENTITY LINE WIDTH",     false, {0, 0, 0, 0}},
         {"[<>] SBC / RAW LINE WIDTH",  false, {0, 0, 0, 0}},
-        {"[TAB] MONSTER PART FILTER",  true,  {0.18f, 0.96f, 0.52f, 0.96f}}
+        {"[TAB] MONSTER PART FILTER",  true,  {0.18f, 0.96f, 0.52f, 0.96f}},
+        {"[<>] FREEZE DELAYED BURST",  false, {0, 0, 0, 0}}
     };
 
     const std::uint32_t kRowBits[9] = {
@@ -5003,7 +5114,7 @@ void DrawInteractiveFilterPanel(std::vector<OverlayVertex>& outVerts,
     };
 
     for (int r = 0; r < kMainRows; ++r) {
-        if (r == 9 || r == 17) {
+        if (r == 9 || r == 17 || r == 18) {
             proj.emitRect2D(outVerts, x0 + padX, curY + 1.5f * resScale,
                             x0 + panelW - padX, curY + 2.5f * resScale,
                             csEnc.encode({0.22f, 0.30f, 0.42f, 0.80f}));
@@ -5090,6 +5201,10 @@ void DrawInteractiveFilterPanel(std::vector<OverlayVertex>& outVerts,
                 }
                 vCol = colOn;
             }
+        } else if (r == 18) {
+            const bool burstOn = freeze::IsWorldFreezeBurstEnabled();
+            std::snprintf(valBuf, sizeof(valBuf), burstOn ? "< ON  >" : "< OFF >");
+            vCol = burstOn ? colOn : colOff;
         }
 
         DrawText5x7(outVerts, proj, valX, curY + 1.0f * ps, ps, valBuf, vCol);
@@ -5166,7 +5281,94 @@ void BuildOverlayFrame(std::uintptr_t exeBase,
     ColorSpaceEncoder csEnc;
     csEnc.init(backBufferDxgiFormat, snap.hdrActive, snap.hdrWhiteNits, cfg.hdrNits);
 
-    const float resScale = screenH / 1080.0f;
+    // Resolve exact active BackBuffer display sub-rectangle & 3D camera viewport (16:9 / 21:9 / 32:9,
+    // pillarbox/letterbox, and anisotropic Borderless stretch, verified @ 0x14229f090 & 0x1422979f0)
+    float dispX  = 0.0f;
+    float dispY  = 0.0f;
+    float dispW  = screenW;
+    float dispH  = screenH;
+    float sceneW = screenW;
+    float sceneH = screenH;
+    if (snap.hasDisplayRect && snap.renderBbW >= 64 && snap.renderBbH >= 64) {
+        const float bbSx = screenW / static_cast<float>(snap.renderBbW);
+        const float bbSy = screenH / static_cast<float>(snap.renderBbH);
+        float dL = static_cast<float>(snap.dispLeft)   * bbSx;
+        float dT = static_cast<float>(snap.dispTop)    * bbSy;
+        float dR = static_cast<float>(snap.dispRight)  * bbSx;
+        float dB = static_cast<float>(snap.dispBottom) * bbSy;
+        if (dL < 0.0f)    dL = 0.0f;
+        if (dT < 0.0f)    dT = 0.0f;
+        if (dR > screenW) dR = screenW;
+        if (dB > screenH) dB = screenH;
+        if (dR - dL >= 64.0f && dB - dT >= 64.0f) {
+            dispX = dL;
+            dispY = dT;
+            dispW = dR - dL;
+            dispH = dB - dT;
+        }
+        if (snap.sceneW >= 64 && snap.sceneH >= 64) {
+            sceneW = static_cast<float>(snap.sceneW);
+            sceneH = static_cast<float>(snap.sceneH);
+        } else {
+            sceneW = dispW;
+            sceneH = dispH;
+        }
+    }
+
+    float vpX = dispX;
+    float vpY = dispY;
+    float vpW = dispW;
+    float vpH = dispH;
+    if (snap.hasVpRegion && sceneW >= 64.0f && sceneH >= 64.0f) {
+        const float vL = static_cast<float>(snap.vpLeft);
+        const float vT = static_cast<float>(snap.vpTop);
+        const float vR = static_cast<float>(snap.vpRight);
+        const float vB = static_cast<float>(snap.vpBottom);
+        if (vL >= 0.0f && vT >= 0.0f && vR <= sceneW + 1.0f && vB <= sceneH + 1.0f &&
+            (vR - vL) >= 32.0f && (vB - vT) >= 32.0f) {
+            vpX = dispX + (vL / sceneW) * dispW;
+            vpY = dispY + (vT / sceneH) * dispH;
+            vpW = ((vR - vL) / sceneW) * dispW;
+            vpH = ((vB - vT) / sceneH) * dispH;
+        }
+    }
+
+    // Safeguard for external camera-only ultrawide scripts that override uCamera->mAspect & copyToBackBuffer
+    // to full BackBuffer without updating sMhRender::mDisplayRect (+0x188..+0x194)
+    if (snap.hasCamera && std::fabs(snap.proj[0]) > 1e-4f && std::fabs(snap.proj[5]) > 1e-4f &&
+        (dispW < screenW - 4.0f || dispH < screenH - 4.0f)) {
+        const float camAspect  = std::fabs(snap.proj[5] / snap.proj[0]);
+        const float fullAspect = screenW / screenH;
+        const float expAspect  = (snap.hasVpRegion && snap.vpBottom > snap.vpTop)
+                                     ? (static_cast<float>(snap.vpRight - snap.vpLeft) /
+                                        static_cast<float>(snap.vpBottom - snap.vpTop))
+                                     : (sceneW / sceneH);
+        if (std::fabs(camAspect - expAspect) > 0.06f && std::fabs(camAspect - fullAspect) < 0.015f) {
+            dispX = 0.0f; dispY = 0.0f; dispW = screenW; dispH = screenH;
+            sceneW = screenW; sceneH = screenH;
+            vpX = 0.0f; vpY = 0.0f; vpW = screenW; vpH = screenH;
+        }
+    }
+
+    float uiAspectX = (dispH > 1.0f && sceneW > 1.0f) ? ((dispW * sceneH) / (dispH * sceneW)) : 1.0f;
+    if (!std::isfinite(uiAspectX) || std::fabs(uiAspectX - 1.0f) < 0.005f) {
+        uiAspectX = 1.0f;
+    } else if (uiAspectX < 0.4f) {
+        uiAspectX = 0.4f;
+    } else if (uiAspectX > 2.5f) {
+        uiAspectX = 2.5f;
+    }
+
+    outStats.dispX  = dispX;
+    outStats.dispY  = dispY;
+    outStats.dispW  = dispW;
+    outStats.dispH  = dispH;
+    outStats.sceneW = sceneW;
+    outStats.sceneH = sceneH;
+
+    const float uiW = dispW / uiAspectX;
+    const float uiH = dispH;
+    const float resScale = uiH / 1080.0f;
     const float baseHalfThick   = 0.5f * cfg.lineThickness * ((resScale > 0.75f) ? resScale : 0.75f);
     const float entityHalfThick = baseHalfThick * app::LineScaleFromIdx(viewState.entityLineIdx);
     const float sbcHalfThick    = baseHalfThick * app::LineScaleFromIdx(viewState.sbcLineIdx);
@@ -5175,11 +5377,13 @@ void BuildOverlayFrame(std::uintptr_t exeBase,
 
     LineProjector proj;
     if (snap.hasCamera) {
-        proj.init(snap.view, snap.proj, snap.camPos, screenW, screenH);
+        proj.init(snap.view, snap.proj, snap.camPos,
+                  screenW, screenH, dispX, dispY, dispW, dispH, vpX, vpY, vpW, vpH, uiAspectX);
     } else {
         float ident[16]{1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
         float zero[3]{0,0,0};
-        proj.init(ident, ident, zero, screenW, screenH);
+        proj.init(ident, ident, zero,
+                  screenW, screenH, dispX, dispY, dispW, dispH, vpX, vpY, vpW, vpH, uiAspectX);
     }
 
     // Note: DIM 45% (BackdropMode::DimScrim) is applied pre-UI via MHW's 3D uColorCorrectFilter
@@ -6032,7 +6236,7 @@ void BuildOverlayFrame(std::uintptr_t exeBase,
             const Color4 brkCol    = csEnc.encode(isFull ? Color4{1.00f, 0.26f, 0.20f, 0.85f}
                                                          : Color4{1.00f, 0.74f, 0.14f, 0.85f});
 
-            // 4 sleek viewfinder corner brackets around the screen perimeter
+            // 4 sleek viewfinder corner brackets around the active display perimeter
             const float bm = 8.0f * resScale;
             const float bl = 32.0f * resScale;
             const float bt = 3.0f * resScale;
@@ -6040,22 +6244,31 @@ void BuildOverlayFrame(std::uintptr_t exeBase,
             proj.emitRect2D(outVerts, bm, bm, bm + bl, bm + bt, brkCol);
             proj.emitRect2D(outVerts, bm, bm + bt, bm + bt, bm + bl, brkCol);
             // Top-Right
-            proj.emitRect2D(outVerts, screenW - bm - bl, bm, screenW - bm, bm + bt, brkCol);
-            proj.emitRect2D(outVerts, screenW - bm - bt, bm + bt, screenW - bm, bm + bl, brkCol);
+            proj.emitRect2D(outVerts, uiW - bm - bl, bm, uiW - bm, bm + bt, brkCol);
+            proj.emitRect2D(outVerts, uiW - bm - bt, bm + bt, uiW - bm, bm + bl, brkCol);
             // Bottom-Left
-            proj.emitRect2D(outVerts, bm, screenH - bm - bt, bm + bl, screenH - bm, brkCol);
-            proj.emitRect2D(outVerts, bm, screenH - bm - bl, bm + bt, screenH - bm - bt, brkCol);
+            proj.emitRect2D(outVerts, bm, uiH - bm - bt, bm + bl, uiH - bm, brkCol);
+            proj.emitRect2D(outVerts, bm, uiH - bm - bl, bm + bt, uiH - bm - bt, brkCol);
             // Bottom-Right
-            proj.emitRect2D(outVerts, screenW - bm - bl, screenH - bm - bt, screenW - bm, screenH - bm, brkCol);
-            proj.emitRect2D(outVerts, screenW - bm - bt, screenH - bm - bl, screenW - bm, screenH - bm - bt, brkCol);
+            proj.emitRect2D(outVerts, uiW - bm - bl, uiH - bm - bt, uiW - bm, uiH - bm, brkCol);
+            proj.emitRect2D(outVerts, uiW - bm - bt, uiH - bm - bl, uiW - bm, uiH - bm - bt, brkCol);
 
             // Top-Center bold Freeze Banner Pill
             const char* titleStr = isFull ? "FULL FREEZE" : "WORLD FREEZE";
-            const char* subStr   = isFull
-                                       ? "[I] RESUME   [O] +1F"
-                                       : (freeze::IsKeepHitboxesActive()
-                                              ? "[K] RESUME   [O] +1F   [J] KEEP:ON"
-                                              : "[K] RESUME   [O] +1F   [J] KEEP:OFF");
+            char subBuf[64]{};
+            if (isFull) {
+                std::snprintf(subBuf, sizeof(subBuf), "[I] RESUME   [O] +1F");
+            } else {
+                const bool keepOn = freeze::IsKeepHitboxesActive();
+                if (freeze::IsWorldFreezeBurstEnabled()) {
+                    std::snprintf(subBuf, sizeof(subBuf), "[K] RESUME  [O] +1F  [J] KEEP:%s  BURST:%u",
+                                  keepOn ? "ON" : "OFF", freeze::BurstDeferredCount());
+                } else {
+                    std::snprintf(subBuf, sizeof(subBuf), "[K] RESUME  [O] +1F  [J] KEEP:%s  BURST:OFF",
+                                  keepOn ? "ON" : "OFF");
+                }
+            }
+            const char* subStr = subBuf;
 
             const float fpx      = std::floor(px * 1.45f + 0.5f);
             const float spx      = px;
@@ -6073,7 +6286,7 @@ void BuildOverlayFrame(std::uintptr_t exeBase,
             const float rowGap   = 5.0f * resScale;
             const float pillW    = innerW + pPadX * 2.0f;
             const float pillH    = 7.0f * fpx + rowGap + 7.0f * spx + pPadY * 2.0f;
-            const float pillX0   = std::floor((screenW - pillW) * 0.5f);
+            const float pillX0   = std::floor((uiW - pillW) * 0.5f);
             const float pillY0   = (leftBarRight + 14.0f * resScale > pillX0)
                                        ? (leftBarBottom + 8.0f * resScale)
                                        : y0;

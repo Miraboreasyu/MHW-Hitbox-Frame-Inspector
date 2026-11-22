@@ -26,6 +26,12 @@ struct FrameStats {
     std::uint32_t preUiLabelEndVert   = 0; // [worldOverlayEndVert .. preUiLabelEndVert): Pass 3b 3D part labels (Depth OFF, pre-UI restore!)
     float projM32                     = 10.0f; // |proj[14]| for exact Reversed-Z <-> world cm conversion
     float projM22                     = 0.0f;  // ||proj[10]| - 1| = zNear / (zFar - zNear)
+    float dispX                       = 0.0f;  // Active BackBuffer display sub-rect left (px, 0x14229f090)
+    float dispY                       = 0.0f;  // Active BackBuffer display sub-rect top  (px, 0x14229f090)
+    float dispW                       = 0.0f;  // Active BackBuffer display sub-rect width  (px)
+    float dispH                       = 0.0f;  // Active BackBuffer display sub-rect height (px)
+    float sceneW                      = 0.0f;  // Active RTScreen logical width  (sMhRender + 0x198)
+    float sceneH                      = 0.0f;  // Active RTScreen logical height (sMhRender + 0x19C)
     bool hasCamera                    = false;
 };
 

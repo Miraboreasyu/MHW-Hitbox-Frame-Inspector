@@ -116,6 +116,11 @@ bool TryApplyChatOrPadKey(const std::string& key,
         chat.cmdOverlay = ParseChatCmdValue(rawValTrimmed);
         return true;
     }
+    if (key == "CHATCMDFREEZEBURST" || key == "CHAT_CMD_FREEZE_BURST" || key == "CHATFREEZEBURST" ||
+        key == "CHATCMDBURST" || key == "CHATBURST") {
+        chat.cmdFreezeBurst = ParseChatCmdValue(rawValTrimmed);
+        return true;
+    }
     if (key == "GAMEPADPANEL" || key == "GAMEPAD_PANEL" || key == "CONTROLLERPANEL") {
         gamepadPanel = std::atoi(strippedVal.c_str()) != 0;
         return true;
@@ -339,6 +344,9 @@ Config LoadConfig() {
         else if (key == "STARTVISON") cfg.startVisOn = std::atoi(val.c_str()) != 0;
         else if (key == "KEEPHITBOXESACTIVE" || key == "PERSISTHITBOXES" || key == "KEEP_HITBOXES_ACTIVE")
             cfg.keepHitboxesActive = std::atoi(val.c_str()) != 0;
+        else if (key == "WORLDFREEZEDELAYEDBURST" || key == "WORLD_FREEZE_DELAYED_BURST" || key == "FREEZEBURST" ||
+                 key == "DELAYEDBURST")
+            cfg.worldFreezeDelayedBurst = std::atoi(val.c_str()) != 0;
         else if (key == "BLOCKCAMERAKEYS" || key == "DISABLECAMERAKEYS" || key == "BLOCK_CAMERA_KEYS")
             cfg.blockCameraKeys = std::atoi(val.c_str()) != 0;
         else if (key == "SHOWHUDBANNER") cfg.showHudBanner = std::atoi(val.c_str()) != 0;
@@ -420,13 +428,14 @@ Config LoadConfig() {
         }
     }
 
-    Log("config: loaded mhw_hfi.ini (enabled=%d, vkVis=0x%02X, vkFreeze=0x%02X, vkWorld=0x%02X, vkKeep=0x%02X, vkStep=0x%02X, vkPanel=0x%02X, vkOverlay=0x%02X, mask=0x%02X; chat en=%d cs=%d U=\"%s\" I=\"%s\" K=\"%s\" O=\"%s\" J=\"%s\" P=\"%s\" \\=\"%s\" pad=%d)",
+    Log("config: loaded mhw_hfi.ini (enabled=%d, vkVis=0x%02X, vkFreeze=0x%02X, vkWorld=0x%02X, vkKeep=0x%02X, vkStep=0x%02X, vkPanel=0x%02X, vkOverlay=0x%02X, mask=0x%02X, burst=%d; chat en=%d cs=%d U=\"%s\" I=\"%s\" K=\"%s\" O=\"%s\" J=\"%s\" P=\"%s\" \\=\"%s\" burstCmd=\"%s\" pad=%d)",
         cfg.enabled ? 1 : 0, cfg.vkToggleVis, cfg.vkToggleFreeze, cfg.vkFreezeOthers,
         cfg.vkPersistHitbox, cfg.vkStepFrame, cfg.vkCycleFilter, cfg.vkToggleOverlay, cfg.defaultVisMask,
+        cfg.worldFreezeDelayedBurst ? 1 : 0,
         cfg.chat.enabled ? 1 : 0, cfg.chat.caseSensitive ? 1 : 0,
         cfg.chat.cmdVis.c_str(), cfg.chat.cmdFreeze.c_str(), cfg.chat.cmdWorldFreeze.c_str(),
         cfg.chat.cmdStep.c_str(), cfg.chat.cmdKeepHitbox.c_str(), cfg.chat.cmdPanel.c_str(),
-        cfg.chat.cmdOverlay.c_str(), cfg.gamepadPanel ? 1 : 0);
+        cfg.chat.cmdOverlay.c_str(), cfg.chat.cmdFreezeBurst.c_str(), cfg.gamepadPanel ? 1 : 0);
     return cfg;
 }
 
@@ -480,12 +489,12 @@ bool HotReloadRuntimeConfig(ChatCommandConfig& ioChat, bool& ioGamepadPanel) {
     ioChat         = nextChat;
     ioGamepadPanel = nextGamepad;
 
-    Log("config: hot-reloaded mhw_hfi.ini (%s; chat en=%d cs=%d U=\"%s\" I=\"%s\" K=\"%s\" O=\"%s\" J=\"%s\" P=\"%s\" \\=\"%s\" pad=%d)",
+    Log("config: hot-reloaded mhw_hfi.ini (%s; chat en=%d cs=%d U=\"%s\" I=\"%s\" K=\"%s\" O=\"%s\" J=\"%s\" P=\"%s\" \\=\"%s\" burstCmd=\"%s\" pad=%d)",
         curStamp.exists ? "updated" : "removed -> defaults",
         nextChat.enabled ? 1 : 0, nextChat.caseSensitive ? 1 : 0,
         nextChat.cmdVis.c_str(), nextChat.cmdFreeze.c_str(), nextChat.cmdWorldFreeze.c_str(),
         nextChat.cmdStep.c_str(), nextChat.cmdKeepHitbox.c_str(), nextChat.cmdPanel.c_str(),
-        nextChat.cmdOverlay.c_str(), nextGamepad ? 1 : 0);
+        nextChat.cmdOverlay.c_str(), nextChat.cmdFreezeBurst.c_str(), nextGamepad ? 1 : 0);
     return true;
 }
 

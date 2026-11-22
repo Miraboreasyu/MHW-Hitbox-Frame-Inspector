@@ -164,15 +164,25 @@ constexpr std::size_t kOffInputEditorState      = 0x188;   // int32_t: 0 = none,
 constexpr std::size_t kOffCCFilterMatrix        = 0x470;   // float fMatrix[4][4] (16 floats, identity @ 0x143fde920)
 constexpr std::size_t kOffCCFilterBlendRate     = 0x570;   // float fBlendRate (0.0 .. 1.0)
 
-// ---- sMhRender HDR & Scene Target / nDraw::Texture Offsets ----
+// ---- sMhRender HDR, Display Sub-Rect (16:9 / 21:9 Pillarbox/Letterbox), & Scene Target Offsets ----
 constexpr std::size_t kOffRenderD3DRender       = 0x78;    // cD3DRender* on sMhRender (0x1423c3790)
 constexpr std::size_t kOffRenderDx12UpscaleFlag = 0xA6;    // uint8_t upscale enable byte on sMhRender (0x1423c3790)
 constexpr std::size_t kOffRenderUpscaleBits     = 0xB4;    // uint8_t (& 2 = upscale active) on sMhRender
 constexpr std::size_t kOffRenderFxaaEnabled     = 0xBC;    // uint8_t FXAA enable on sMhRender (0x1423c3790)
+constexpr std::size_t kOffRenderDispLeft        = 0x188;   // int32_t active BackBuffer blit rect left   (0x14229f090 / 0x1422938b0)
+constexpr std::size_t kOffRenderDispTop         = 0x18C;   // int32_t active BackBuffer blit rect top    (0x14229f090 / 0x1422938b0)
+constexpr std::size_t kOffRenderDispRight       = 0x190;   // int32_t active BackBuffer blit rect right  (0x14229f090 / 0x1422938b0)
+constexpr std::size_t kOffRenderDispBottom      = 0x194;   // int32_t active BackBuffer blit rect bottom (0x14229f090 / 0x1422938b0)
+constexpr std::size_t kOffRenderSceneWidth      = 0x198;   // int32_t active RTScreen / 3D logical width (0x14229ef20 / 0x142290420)
+constexpr std::size_t kOffRenderSceneHeight     = 0x19C;   // int32_t active RTScreen / 3D logical height(0x14229ef20 / 0x142290420)
 constexpr std::size_t kOffRenderUpscaleRatio    = 0x204;   // float upscale factor on sMhRender (!= 1.0f when upscaling)
 constexpr std::size_t kOffRenderHdrOutput       = 0x21A;
 constexpr std::size_t kOffRenderHdrWhiteNits    = 0x21C;
+constexpr std::size_t kOffRenderBackBufW        = 0x1F448; // int32_t SwapChain BackBuffer width  on sMhRender (0x14229c160 / 0x1422938b0)
+constexpr std::size_t kOffRenderBackBufH        = 0x1F44C; // int32_t SwapChain BackBuffer height on sMhRender (0x14229c160 / 0x1422938b0)
 constexpr std::size_t kOffRenderSceneMain       = 0x1F450; // cRenderScene* (main 3D + 2D uGUI scene on sMhRender)
+constexpr std::size_t kOffRenderAspectMode      = 0x7B43C; // int32_t aspect mode: 0=Unclamped, 1=16:9 (1.7778), 2=21:9 (64:27=2.3704)
+constexpr std::size_t kOffRenderAspectVal       = 0x7B444; // float active scene aspect ratio (sceneW / sceneH)
 constexpr std::size_t kOffD3DUpscaleCtx         = 0x42700; // void* DLSS/CAS context on cD3DRender (0x1423c3790)
 constexpr std::size_t kOffD3DUpscaleActive      = 0x42718; // uint8_t DLSS/CAS active on cD3DRender (0x1423c3790)
 
@@ -185,6 +195,7 @@ constexpr std::size_t kOffSceneTargets          = 0x628;   // cRenderSceneTarget
 constexpr std::size_t kOffSceneUpscaleTex       = 0x6A0;   // nDraw::Texture* UpscaleOut / FXAA output (0x1423c2620 / 0x1423c3790)
 constexpr std::size_t kOffSceneAaEnabled        = 0x6A8;   // uint8_t scene AA/upscale active on cRenderScene
 constexpr std::size_t kOffSceneDynamicScale     = 0x6B0;   // float dynamic resolution fraction (0..1] on cRenderScene
+constexpr std::size_t kOffSceneUpscaleFactor    = 0x6B4;   // float base upscale factor on cRenderScene (0x14255ba70)
 constexpr std::size_t kOffSceneRenderScale      = 0x6B8;   // float total render scale on cRenderScene
 
 constexpr std::size_t kOffRenderTargetTex       = 0x58;    // nDraw::Texture* on nDraw::RenderTargetView
@@ -546,5 +557,40 @@ constexpr std::int32_t kGeomOBB               = 8;
 constexpr std::int32_t kGeomCylinder          = 9;
 constexpr std::int32_t kGeomTriangle          = 11;
 constexpr std::int32_t kGeomLineSweptSphere   = 19;
+
+// ---- World Freeze Delayed Burst (MHW:I 15.23) ----
+// Hook sites: all 16B-aligned, 5-byte single-instruction prologues.
+constexpr std::uintptr_t kRvaShowDamageNumber       = 0x1AE3140; // sMhGUI::ShowDamageNumber       48 89 5C 24 08
+constexpr std::uintptr_t kRvaShowDamageNumberZorah  = 0x1AE3210; // sMhGUI::ShowDamageNumberZorah  48 89 5C 24 08
+constexpr std::uintptr_t kRvaShowDamageNumberEx     = 0x1AE32E0; // sMhGUI::ShowDamageNumberEx     48 89 5C 24 08
+constexpr std::uintptr_t kRvaSpawnHitEfcHelper      = 0x02BB830; // cEmDamageCheck::spawnHitEfcHelper 48 89 7C 24 20
+constexpr std::uintptr_t kRvaAddShake1              = 0x1AC5010; // sMhCamera::addShake1           48 89 5C 24 10
+constexpr std::uintptr_t kRvaAddShake2              = 0x1AC50B0; // sMhCamera::addShake2           48 89 5C 24 18
+constexpr std::uintptr_t kRvaOnAttackHitFeedback    = 0x2035720; // uPlayer::onAttackHitFeedback   48 89 74 24 18
+
+constexpr std::uintptr_t kRvaSMhGuiInstance         = 0x51C4640; // sMhGUI*
+constexpr std::uintptr_t kRvaSMhEffectInstance      = 0x51C5D48; // sMhEffect*
+constexpr std::uintptr_t kRvaUMhEffectDti           = 0x502CE18; // uMhEffect::DTI (object address, do NOT deref)
+constexpr std::uintptr_t kRvaCommonEpvHitmark       = 0x5012558; // common_epv_cm_hitmark (pointer)
+
+constexpr std::size_t kOffSMhGuiHudDamage           = 0x14150;   // uGUIHudDamage* at sMhGUI + 0x14150
+constexpr std::size_t kOffHudDmgSlotBase            = 0x28F0;
+constexpr std::size_t kOffHudDmgActive              = 0x2901;
+constexpr std::size_t kHudDmgSlotStride             = 0x90;
+constexpr std::size_t kHudDmgSlotCount              = 20;
+
+constexpr std::size_t kOffSMhEffectCreateVft        = 0x108;     // vft slot: create cEfcHandle
+constexpr std::size_t kOffMoveLine13UnitNum         = 0x13 * 0xF8 + 0x9A; // sMhUnit::mMoveLine[0x13].mUnitNum (u16)
+
+constexpr std::size_t kOffPlayerHitstopState        = 0xB2E0;    // int32 (-1 = off)
+constexpr std::size_t kOffPlayerHitstopEnd          = 0xB314;
+constexpr std::size_t kOffCamVerticalFov            = 0x144;     // float baseline vertical FOV
+constexpr std::size_t kOffCamFovOverride            = 0x155C;    // one-shot vertical FOV override (auto-cleared per frame)
+
+constexpr std::uintptr_t kRvaCMhEfcParamVft         = 0x2F189B0; // cMhEfcParam::vft (verified in data.tsv & 0x1402bd0cc)
+constexpr std::uintptr_t kRvaEpvGetEffectElement    = 0x23635C0; // rEffectProvider::GetEffectElement(epv, elemIdx, efxIdx)
+constexpr std::uintptr_t kRvaWwiseCallEventById     = 0x22FE610; // cWwiseContainer::callEventById(container, unit, bankId, evId, param)
+constexpr std::uintptr_t kRvaConstVec3Zero          = 0x503C430; // FLOAT_14503c430/434/438 ({0,0,0})
+constexpr std::uintptr_t kRvaConstVec3UnitZ         = 0x3FDE890; // default forward vector used by 0x1418d7e30 & 0x1402bcf50
 
 } // namespace mhw

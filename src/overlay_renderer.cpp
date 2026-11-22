@@ -16,7 +16,9 @@ namespace {
 
 constexpr const char* kOverlayHlsl = R"(
 cbuffer OverlayCB : register(b0) {
-    float2 gInvScreen;
+    float2 gDispOffset;
+    float2 gInvDispSize;
+    float2 gDispSize;
     float2 gDepthActiveSize;
     float2 gPostUiUvScale;
     float2 gPreUiUvScale;
@@ -63,7 +65,11 @@ float4 PSMain(PSIn i) : SV_TARGET {
 
 float4 PSDepthClip(PSIn i) : SV_TARGET {
     if ((gFlags & 1u) != 0u) {
-        float2 uv = i.pos.xy * gInvScreen;
+        float2 rel = i.pos.xy - gDispOffset;
+        if (rel.x < 0.0f || rel.y < 0.0f || rel.x >= gDispSize.x || rel.y >= gDispSize.y) {
+            discard;
+        }
+        float2 uv = saturate(rel * gInvDispSize);
         int2 maxCoord = max(int2(gDepthActiveSize) - int2(1, 1), int2(0, 0));
         int2 dp = clamp(int2(uv * gDepthActiveSize), int2(0, 0), maxCoord);
         float sd = tSceneDepth.Load(int3(dp, 0));
@@ -86,15 +92,15 @@ float rgbaRelMaxDiff(float4 a, float4 b) {
     return max(max(dRgb.r, dRgb.g), max(dRgb.b, dA));
 }
 
-float uiDiffAt(int2 c, int2 maxPx) {
-    int2 cc = clamp(c, int2(0, 0), maxPx);
+float uiDiffAt(int2 c, int2 maxDispPx) {
+    int2 cc = clamp(c, int2(0, 0), maxDispPx);
     float4 postV;
     float4 pre0V;
     if ((gFlags & 4u) != 0u) {
         postV = tPostUi.Load(int3(cc, 0));
         pre0V = tPreUi0.Load(int3(cc, 0));
     } else {
-        float2 uv = saturate((float2(cc) + 0.5f) * gInvScreen);
+        float2 uv = saturate((float2(cc) + 0.5f) * gInvDispSize);
         postV = tPostUi.SampleLevel(sLinearClamp, uv * gPostUiUvScale, 0.0f);
         pre0V = tPreUi0.SampleLevel(sLinearClamp, uv * gPreUiUvScale, 0.0f);
     }
@@ -104,7 +110,7 @@ float uiDiffAt(int2 c, int2 maxPx) {
         if ((gFlags & 4u) != 0u) {
             pre1V = tPreUi1.Load(int3(cc, 0));
         } else {
-            float2 uv = saturate((float2(cc) + 0.5f) * gInvScreen);
+            float2 uv = saturate((float2(cc) + 0.5f) * gInvDispSize);
             pre1V = tPreUi1.SampleLevel(sLinearClamp, uv * gPreUiUvScale, 0.0f);
         }
         d = min(d, rgbaRelMaxDiff(postV, pre1V));
@@ -113,19 +119,24 @@ float uiDiffAt(int2 c, int2 maxPx) {
 }
 
 float4 PSRestoreUI(PSIn i) : SV_TARGET {
-    int2 px = int2(i.pos.xy);
-    int2 maxPx = max(int2(round(1.0f / max(gInvScreen, float2(1e-6f, 1e-6f)))) - int2(1, 1), int2(0, 0));
+    int2 px         = int2(i.pos.xy);
+    int2 dispOrigin = int2(round(gDispOffset));
+    int2 maxDispPx  = max(int2(round(gDispSize)) - int2(1, 1), int2(0, 0));
+    int2 relPx      = px - dispOrigin;
+    if (relPx.x < 0 || relPx.y < 0 || relPx.x > maxDispPx.x || relPx.y > maxDispPx.y) {
+        discard;
+    }
     float lo = ((gFlags & 4u) != 0u) ? 0.0065f : 0.014f;
     float hi = ((gFlags & 4u) != 0u) ? 0.0280f : 0.042f;
 
-    float dC = uiDiffAt(px, maxPx);
+    float dC = uiDiffAt(relPx, maxDispPx);
     if (dC < hi) {
         // Bilateral opposing-pair bridge: fills 1-3px accidental color-match pinholes inside solid UI
         // while adding 0.0px outward halo on straight UI edges and text corners!
-        float dL = uiDiffAt(px + int2(-2,  0), maxPx);
-        float dR = uiDiffAt(px + int2( 2,  0), maxPx);
-        float dU = uiDiffAt(px + int2( 0, -2), maxPx);
-        float dD = uiDiffAt(px + int2( 0,  2), maxPx);
+        float dL = uiDiffAt(relPx + int2(-2,  0), maxDispPx);
+        float dR = uiDiffAt(relPx + int2( 2,  0), maxDispPx);
+        float dU = uiDiffAt(relPx + int2( 0, -2), maxDispPx);
+        float dD = uiDiffAt(relPx + int2( 0,  2), maxDispPx);
         dC = max(dC, max(min(dL, dR), min(dU, dD)));
     }
 
@@ -139,8 +150,12 @@ float4 PSRestoreUI(PSIn i) : SV_TARGET {
 )";
 
 struct OverlayConstants {
-    float         invScreenX;
-    float         invScreenY;
+    float         dispOffsetX;
+    float         dispOffsetY;
+    float         invDispW;
+    float         invDispH;
+    float         dispW;
+    float         dispH;
     float         depthActiveW;
     float         depthActiveH;
     float         postUiUvScaleX;
@@ -152,7 +167,7 @@ struct OverlayConstants {
     float         depthBiasCm;
     std::uint32_t flags;
 };
-static_assert(sizeof(OverlayConstants) == 48, "OverlayConstants must be 48 bytes (12 DWORDs)");
+static_assert(sizeof(OverlayConstants) == 64, "OverlayConstants must be 64 bytes (16 DWORDs)");
 
 ID3DBlob* g_vsBlob           = nullptr;
 ID3DBlob* g_vsFullscreenBlob = nullptr;
@@ -419,9 +434,18 @@ void ResolveEngineSceneTexturesSEH(std::uintptr_t exeBase, bool isDx12, EngineSc
 
         const std::uint32_t sceneFlags = *reinterpret_cast<const std::uint32_t*>(
             mainScene + mhw::kOffSceneFlags);
-        float dynScale = *reinterpret_cast<const float*>(mainScene + mhw::kOffSceneDynamicScale);
+        float dynScale    = *reinterpret_cast<const float*>(mainScene + mhw::kOffSceneDynamicScale);
+        float upscaleFac  = *reinterpret_cast<const float*>(mainScene + mhw::kOffSceneUpscaleFactor);
+        float renderScale = *reinterpret_cast<const float*>(mainScene + mhw::kOffSceneRenderScale);
         if (!std::isfinite(dynScale) || dynScale < 0.2f || dynScale > 1.0f) {
             dynScale = 1.0f;
+        }
+        if (std::isfinite(upscaleFac) && upscaleFac > 0.2f && upscaleFac <= 1.0f &&
+            std::isfinite(renderScale) && renderScale >= 0.2f && renderScale <= 1.0f) {
+            const float ratio = renderScale / upscaleFac;
+            if (ratio >= 0.2f && ratio <= 1.0f) {
+                dynScale = ratio;
+            }
         }
 
         const std::uintptr_t targets = *reinterpret_cast<const std::uintptr_t*>(
@@ -623,6 +647,7 @@ struct D3D11State {
     ID3D11BlendState* blend              = nullptr;
     ID3D11BlendState* blendOpaque        = nullptr;
     ID3D11RasterizerState* rast          = nullptr;
+    ID3D11RasterizerState* rastScissor   = nullptr;
     ID3D11DepthStencilState* depth       = nullptr;
     ID3D11DepthStencilState* depthWrite  = nullptr;
     ID3D11DepthStencilState* depthRead   = nullptr;
@@ -652,6 +677,7 @@ struct D3D11State {
         if (depthRead)     { depthRead->Release();     depthRead = nullptr; }
         if (depthWrite)    { depthWrite->Release();    depthWrite = nullptr; }
         if (depth)         { depth->Release();         depth = nullptr; }
+        if (rastScissor)   { rastScissor->Release();   rastScissor = nullptr; }
         if (rast)          { rast->Release();          rast = nullptr; }
         if (blendOpaque)   { blendOpaque->Release();   blendOpaque = nullptr; }
         if (blend)         { blend->Release();         blend = nullptr; }
@@ -837,6 +863,14 @@ struct D3D11State {
             rd.DepthClipEnable = FALSE;
             rd.ScissorEnable   = FALSE;
             if (FAILED(dev->CreateRasterizerState(&rd, &rast))) return false;
+        }
+        if (!rastScissor) {
+            D3D11_RASTERIZER_DESC rd{};
+            rd.FillMode        = D3D11_FILL_SOLID;
+            rd.CullMode        = D3D11_CULL_NONE;
+            rd.DepthClipEnable = FALSE;
+            rd.ScissorEnable   = TRUE;
+            if (FAILED(dev->CreateRasterizerState(&rd, &rastScissor))) return false;
         }
         if (!depth) {
             D3D11_DEPTH_STENCIL_DESC dd{};
@@ -1334,19 +1368,61 @@ struct D3D12State {
 } g_d3d12;
 
 std::vector<coll::OverlayVertex> g_verts;
-bool g_loggedSceneDepth = false;
-bool g_loggedSceneUi    = false;
+bool  g_loggedSceneDepth = false;
+bool  g_loggedSceneUi    = false;
+float g_loggedDispX      = -1.0f;
+float g_loggedDispY      = -1.0f;
+float g_loggedDispW      = -1.0f;
+float g_loggedDispH      = -1.0f;
 
-void LogSceneBindOnce(bool isDx12, const EngineSceneTextures& engTex, const coll::FrameStats& stats) noexcept {
-    const bool newDepth = engTex.hasDepth && !g_loggedSceneDepth;
-    const bool newUi    = engTex.hasUi && !g_loggedSceneUi;
-    if (!newDepth && !newUi) return;
+RECT MakeDisplayScissorRect(const coll::FrameStats& stats, LONG fullW, LONG fullH) noexcept {
+    LONG l = 0, t = 0, r = fullW, b = fullH;
+    if (stats.dispW >= 32.0f && stats.dispH >= 32.0f) {
+        l = static_cast<LONG>(std::floor(stats.dispX + 0.5f));
+        t = static_cast<LONG>(std::floor(stats.dispY + 0.5f));
+        r = static_cast<LONG>(std::floor(stats.dispX + stats.dispW + 0.5f));
+        b = static_cast<LONG>(std::floor(stats.dispY + stats.dispH + 0.5f));
+        if (l < 0)     l = 0;
+        if (t < 0)     t = 0;
+        if (r > fullW) r = fullW;
+        if (b > fullH) b = fullH;
+        if (r <= l || b <= t) {
+            l = 0; t = 0; r = fullW; b = fullH;
+        }
+    }
+    return RECT{l, t, r, b};
+}
+
+void LogSceneBindOnce(bool isDx12,
+                      float screenW,
+                      float screenH,
+                      const EngineSceneTextures& engTex,
+                      const coll::FrameStats& stats,
+                      std::uint32_t cbFlags) noexcept {
+    const float dispX = stats.dispX;
+    const float dispY = stats.dispY;
+    const float dispW = (stats.dispW >= 32.0f) ? stats.dispW : screenW;
+    const float dispH = (stats.dispH >= 32.0f) ? stats.dispH : screenH;
+    const bool newDepth    = engTex.hasDepth && !g_loggedSceneDepth;
+    const bool newUi       = engTex.hasUi && !g_loggedSceneUi;
+    const bool dispChanged = (g_loggedSceneDepth || g_loggedSceneUi) &&
+                             (std::fabs(dispX - g_loggedDispX) >= 1.0f ||
+                              std::fabs(dispY - g_loggedDispY) >= 1.0f ||
+                              std::fabs(dispW - g_loggedDispW) >= 1.0f ||
+                              std::fabs(dispH - g_loggedDispH) >= 1.0f);
+    if (!newDepth && !newUi && !dispChanged) return;
     if (engTex.hasDepth) g_loggedSceneDepth = true;
     if (engTex.hasUi)    g_loggedSceneUi    = true;
-    app::Log("render: scenebind dx12=%d depth=%d(%.0fx%.0f st=0x%X) ui=%d(src=%u dual=%d post=%.0fx%.0f[st=0x%X] pre=%.0fx%.0f[st=0x%X,0x%X]) proj(m32=%.3f,m22=%.6f)",
+    g_loggedDispX = dispX;
+    g_loggedDispY = dispY;
+    g_loggedDispW = dispW;
+    g_loggedDispH = dispH;
+    app::Log("render: scenebind dx12=%d bb=%.0fx%.0f disp=[%.0f,%.0f %.0fx%.0f] scene=%.0fx%.0f depth=%d(%.0fx%.0f st=0x%X) ui=%d(src=%u dual=%d exact=%d post=%.0fx%.0f[st=0x%X] pre=%.0fx%.0f[st=0x%X,0x%X]) proj(m32=%.3f,m22=%.6f)",
              isDx12 ? 1 : 0,
+             screenW, screenH, dispX, dispY, dispW, dispH, stats.sceneW, stats.sceneH,
              engTex.hasDepth ? 1 : 0, engTex.depthActiveW, engTex.depthActiveH, static_cast<unsigned>(engTex.depthState12),
              engTex.hasUi ? 1 : 0, static_cast<unsigned>(engTex.uiSourceKind), engTex.dualPreUi ? 1 : 0,
+             ((cbFlags & 4u) != 0u) ? 1 : 0,
              engTex.postUiActW, engTex.postUiActH, static_cast<unsigned>(engTex.postUiState12),
              engTex.preUiActW, engTex.preUiActH, static_cast<unsigned>(engTex.preUi0State12), static_cast<unsigned>(engTex.preUi1State12),
              stats.projM32, stats.projM22);
@@ -1358,20 +1434,26 @@ OverlayConstants MakeOverlayConstants(float screenW,
                                       const EngineSceneTextures& engTex,
                                       bool visEnabled,
                                       const app::ViewFilterState& viewState) noexcept {
+    const float dispX        = stats.dispX;
+    const float dispY        = stats.dispY;
+    const float dispW        = (stats.dispW >= 64.0f) ? stats.dispW : screenW;
+    const float dispH        = (stats.dispH >= 64.0f) ? stats.dispH : screenH;
+    const bool  intDispOrig  = std::fabs(dispX - std::floor(dispX + 0.5f)) < 0.05f &&
+                               std::fabs(dispY - std::floor(dispY + 0.5f)) < 0.05f;
     const bool hideAll3D     = visEnabled && (viewState.backdrop == app::BackdropMode::HideAll3D);
     const bool hideStage     = visEnabled && (viewState.stageHide != app::StageHideMode::Off);
     const bool isOpaqueSbc   = (viewState.depthMode == app::DepthGuideMode::Opaque ||
                                 viewState.depthMode == app::DepthGuideMode::OpaqueNoRings);
     const bool useSceneDepth = engTex.hasDepth && !hideAll3D;
-    const bool exactLoad     = engTex.hasUi &&
-                               std::fabs(engTex.postUiActW - screenW) < 0.5f &&
-                               std::fabs(engTex.postUiActH - screenH) < 0.5f &&
-                               std::fabs(engTex.preUiActW - screenW) < 0.5f &&
-                               std::fabs(engTex.preUiActH - screenH) < 0.5f &&
+    const bool exactLoad     = engTex.hasUi && intDispOrig &&
+                               std::fabs(engTex.postUiActW - dispW) < 0.5f &&
+                               std::fabs(engTex.postUiActH - dispH) < 0.5f &&
+                               std::fabs(engTex.preUiActW  - dispW) < 0.5f &&
+                               std::fabs(engTex.preUiActH  - dispH) < 0.5f &&
                                std::fabs(engTex.postUiUvScaleX - 1.0f) < 1e-4f &&
                                std::fabs(engTex.postUiUvScaleY - 1.0f) < 1e-4f &&
-                               std::fabs(engTex.preUiUvScaleX - 1.0f) < 1e-4f &&
-                               std::fabs(engTex.preUiUvScaleY - 1.0f) < 1e-4f;
+                               std::fabs(engTex.preUiUvScaleX  - 1.0f) < 1e-4f &&
+                               std::fabs(engTex.preUiUvScaleY  - 1.0f) < 1e-4f;
 
     std::uint32_t flags = 0u;
     if (useSceneDepth)            flags |= 1u;
@@ -1379,10 +1461,14 @@ OverlayConstants MakeOverlayConstants(float screenW,
     if (exactLoad)                flags |= 4u;
 
     OverlayConstants cb{};
-    cb.invScreenX     = (screenW > 1.0f) ? (1.0f / screenW) : (1.0f / 1920.0f);
-    cb.invScreenY     = (screenH > 1.0f) ? (1.0f / screenH) : (1.0f / 1080.0f);
-    cb.depthActiveW   = (engTex.depthActiveW > 1.0f) ? engTex.depthActiveW : screenW;
-    cb.depthActiveH   = (engTex.depthActiveH > 1.0f) ? engTex.depthActiveH : screenH;
+    cb.dispOffsetX    = dispX;
+    cb.dispOffsetY    = dispY;
+    cb.invDispW       = (dispW > 1.0f) ? (1.0f / dispW) : (1.0f / 1920.0f);
+    cb.invDispH       = (dispH > 1.0f) ? (1.0f / dispH) : (1.0f / 1080.0f);
+    cb.dispW          = dispW;
+    cb.dispH          = dispH;
+    cb.depthActiveW   = (engTex.depthActiveW > 1.0f) ? engTex.depthActiveW : dispW;
+    cb.depthActiveH   = (engTex.depthActiveH > 1.0f) ? engTex.depthActiveH : dispH;
     cb.postUiUvScaleX = engTex.postUiUvScaleX;
     cb.postUiUvScaleY = engTex.postUiUvScaleY;
     cb.preUiUvScaleX  = engTex.preUiUvScaleX;
@@ -1494,6 +1580,10 @@ void RenderD3D11(std::uintptr_t exeBase,
                     D3D11_VIEWPORT oldVps[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE]{};
                     ctx->RSGetViewports(&numVps, oldVps);
 
+                    UINT numScissors = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+                    D3D11_RECT oldScissors[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE]{};
+                    ctx->RSGetScissorRects(&numScissors, oldScissors);
+
                     D3D11_PRIMITIVE_TOPOLOGY oldTopo = D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED;
                     ctx->IAGetPrimitiveTopology(&oldTopo);
 
@@ -1511,14 +1601,18 @@ void RenderD3D11(std::uintptr_t exeBase,
                     ctx->PSGetShader(&oldPs, nullptr, nullptr);
                     ctx->GSGetShader(&oldGs, nullptr, nullptr);
 
-                    // Bind overlay pipeline & draw
+                    // Bind overlay pipeline & draw (clipping 3D passes + UI restore strictly to active display sub-rect)
                     D3D11_VIEWPORT vp{};
                     vp.Width    = static_cast<FLOAT>(td.Width);
                     vp.Height   = static_cast<FLOAT>(td.Height);
                     vp.MinDepth = 0.0f;
                     vp.MaxDepth = 1.0f;
                     ctx->RSSetViewports(1, &vp);
-                    ctx->RSSetState(g_d3d11.rast);
+
+                    const D3D11_RECT dispSc = MakeDisplayScissorRect(
+                        stats, static_cast<LONG>(td.Width), static_cast<LONG>(td.Height));
+                    ctx->RSSetScissorRects(1, &dispSc);
+                    ctx->RSSetState(g_d3d11.rastScissor);
 
                     const FLOAT bf[4] = {0, 0, 0, 0};
                     const UINT stride = sizeof(coll::OverlayVertex);
@@ -1548,10 +1642,11 @@ void RenderD3D11(std::uintptr_t exeBase,
                     if (useSceneComposite) {
                         EngineSceneTextures engTex{};
                         ResolveEngineSceneTexturesSEH(exeBase, false, &engTex);
-                        LogSceneBindOnce(false, engTex, stats);
                         const OverlayConstants cbData = MakeOverlayConstants(
                             static_cast<float>(td.Width), static_cast<float>(td.Height),
                             stats, engTex, visEnabled, viewState);
+                        LogSceneBindOnce(false, static_cast<float>(td.Width), static_cast<float>(td.Height),
+                                         engTex, stats, cbData.flags);
 
                         const bool useSceneDepth = (p2End >= 3U) && ((cbData.flags & 1u) != 0u);
                         const bool canRestoreUi  = engTex.hasUi &&
@@ -1649,6 +1744,7 @@ void RenderD3D11(std::uintptr_t exeBase,
                         ctx->PSSetShaderResources(0, 5, nullSrvs);
 
                         // Pass 5: Plugin 2D HUD Banner & [P] Filter Panel (Always Crisp on Top)
+                        ctx->RSSetState(g_d3d11.rast);
                         if (totalVerts > p3bEnd) {
                             ctx->PSSetShader(g_d3d11.ps, nullptr, 0);
                             ctx->Draw(totalVerts - p3bEnd, p3bEnd);
@@ -1665,7 +1761,13 @@ void RenderD3D11(std::uintptr_t exeBase,
                         ctx->OMSetBlendState(g_d3d11.blend, bf, 0xFFFFFFFFU);
                         ctx->OMSetDepthStencilState(g_d3d11.depth, 0);
                         ctx->OMSetRenderTargets(1, &rtv, nullptr);
-                        ctx->Draw(totalVerts, 0);
+                        if (p3bEnd > 0U) {
+                            ctx->Draw(p3bEnd, 0);
+                        }
+                        ctx->RSSetState(g_d3d11.rast);
+                        if (totalVerts > p3bEnd) {
+                            ctx->Draw(totalVerts - p3bEnd, p3bEnd);
+                        }
                     }
 
                     // Restore D3D11 state
@@ -1675,7 +1777,8 @@ void RenderD3D11(std::uintptr_t exeBase,
                     ctx->IASetVertexBuffers(0, 1, &oldVb, &oldStride, &oldOffset);
                     ctx->IASetInputLayout(oldLayout);
                     ctx->IASetPrimitiveTopology(oldTopo);
-                    if (numVps > 0) ctx->RSSetViewports(numVps, oldVps);
+                    if (numScissors > 0) ctx->RSSetScissorRects(numScissors, oldScissors);
+                    if (numVps > 0)      ctx->RSSetViewports(numVps, oldVps);
                     ctx->RSSetState(oldRast);
                     ctx->OMSetDepthStencilState(oldDepth, oldStencilRef);
                     ctx->OMSetBlendState(oldBlend, oldBlendFactor, oldSampleMask);
@@ -1774,10 +1877,11 @@ void RenderD3D12(std::uintptr_t exeBase,
         bool canRestoreUi = false;
         if (useSceneComposite) {
             ResolveEngineSceneTexturesSEH(exeBase, true, &engTex);
-            LogSceneBindOnce(true, engTex, stats);
             cbData = MakeOverlayConstants(static_cast<float>(bbDesc.Width),
                                           static_cast<float>(bbDesc.Height),
                                           stats, engTex, visEnabled, viewState);
+            LogSceneBindOnce(true, static_cast<float>(bbDesc.Width), static_cast<float>(bbDesc.Height),
+                             engTex, stats, cbData.flags);
             canRestoreUi = engTex.hasUi &&
                            (engTex.postUiRes12 != backBuf) &&
                            (engTex.preUi0Res12 != backBuf) &&
@@ -1893,9 +1997,11 @@ void RenderD3D12(std::uintptr_t exeBase,
             D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle{rtvStart + static_cast<SIZE_T>(bbIdx) * rtvDescSize};
 
             D3D12_VIEWPORT vp{0.0f, 0.0f, static_cast<FLOAT>(bbDesc.Width), static_cast<FLOAT>(bbDesc.Height), 0.0f, 1.0f};
-            D3D12_RECT sc{0, 0, static_cast<LONG>(bbDesc.Width), static_cast<LONG>(bbDesc.Height)};
+            const D3D12_RECT fullSc{0, 0, static_cast<LONG>(bbDesc.Width), static_cast<LONG>(bbDesc.Height)};
+            const D3D12_RECT dispSc = MakeDisplayScissorRect(
+                stats, static_cast<LONG>(bbDesc.Width), static_cast<LONG>(bbDesc.Height));
             g_d3d12.cmdList->RSSetViewports(1, &vp);
-            g_d3d12.cmdList->RSSetScissorRects(1, &sc);
+            g_d3d12.cmdList->RSSetScissorRects(1, &dispSc);
 
             if (useSceneComposite) {
                 const SIZE_T srvStride = g_d3d12.srvDescSize;
@@ -1990,6 +2096,7 @@ void RenderD3D12(std::uintptr_t exeBase,
                 }
 
                 // Pass 5: Plugin 2D HUD Banner & [P] Filter Panel
+                g_d3d12.cmdList->RSSetScissorRects(1, &fullSc);
                 if (totalVerts > p3bEnd) {
                     setPso(g_d3d12.pso);
                     g_d3d12.cmdList->DrawInstanced(totalVerts - p3bEnd, 1, p3bEnd, 0);
@@ -1997,7 +2104,13 @@ void RenderD3D12(std::uintptr_t exeBase,
             } else {
                 g_d3d12.cmdList->OMSetRenderTargets(1, &rtvHandle, FALSE, nullptr);
                 setPso(g_d3d12.pso);
-                g_d3d12.cmdList->DrawInstanced(totalVerts, 1, 0, 0);
+                if (p3bEnd > 0U) {
+                    g_d3d12.cmdList->DrawInstanced(p3bEnd, 1, 0, 0);
+                }
+                g_d3d12.cmdList->RSSetScissorRects(1, &fullSc);
+                if (totalVerts > p3bEnd) {
+                    g_d3d12.cmdList->DrawInstanced(totalVerts - p3bEnd, 1, p3bEnd, 0);
+                }
             }
 
             D3D12_RESOURCE_BARRIER bOut[5]{};
