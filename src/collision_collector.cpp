@@ -360,7 +360,202 @@ struct RawSnapshot {
     bool hdrActive;
     float hdrWhiteNits;
     PlayerFrameReadout mainPlDef;
+    std::uintptr_t mainPlPtr;
+    std::uint32_t  mainPlMoveCount;
+    std::uint32_t  emMoveCountSum;
 };
+
+constexpr std::uint32_t kMaxHistFrames         = 180;
+constexpr std::uint32_t kMaxShapesPerHistFrame = 1024;
+constexpr std::uint32_t kMaxTrailShapesBudget  = 1600;
+
+struct HistFrame {
+    PlayerFrameReadout       mainPlDef{};
+    std::vector<ShapeRecord> shapes;
+};
+
+struct HistState {
+    HistFrame     ring[kMaxHistFrames]{};
+    std::uint32_t writePos       = 0;
+    std::uint32_t count          = 0;
+    std::uint32_t scrubOffset    = 0;
+    std::uintptr_t lastPlPtr     = 0;
+    std::uint32_t noCamFrames    = 0;
+    bool          hasLastTick    = false;
+    std::uint32_t lastPlMove     = 0;
+    std::uint32_t lastEmMoveSum  = 0;
+    std::uint32_t lastFullEpoch  = 0;
+    std::uint32_t lastWorldEpoch = 0;
+    freeze::Mode  lastFreezeMode = freeze::Mode::None;
+};
+HistState g_hist{};
+
+void ClearHistState() noexcept {
+    for (std::uint32_t i = 0; i < kMaxHistFrames; ++i) {
+        g_hist.ring[i].shapes.clear();
+        g_hist.ring[i].mainPlDef = PlayerFrameReadout{};
+    }
+    g_hist.writePos       = 0;
+    g_hist.count          = 0;
+    g_hist.scrubOffset    = 0;
+    g_hist.hasLastTick    = false;
+    g_hist.lastPlMove     = 0;
+    g_hist.lastEmMoveSum  = 0;
+    g_hist.lastFullEpoch  = 0;
+    g_hist.lastWorldEpoch = 0;
+    g_hist.lastFreezeMode = freeze::Mode::None;
+}
+
+bool SamePlayerReadout(const PlayerFrameReadout& a, const PlayerFrameReadout& b) noexcept {
+    return a.valid == b.valid &&
+           a.state == b.state &&
+           a.framesRemaining == b.framesRemaining &&
+           a.secondsRemaining == b.secondsRemaining &&
+           std::strncmp(a.badge, b.badge, sizeof(a.badge)) == 0;
+}
+
+bool SameShapeRecord(const ShapeRecord& a, const ShapeRecord& b) noexcept {
+    if (a.cat != b.cat || a.plDef != b.plDef ||
+        a.emPartIdx != b.emPartIdx || a.emFlags != b.emFlags ||
+        a.type != b.type) {
+        return false;
+    }
+    auto eqN = [&](int n) noexcept {
+        return std::memcmp(a.p, b.p, static_cast<std::size_t>(n) * sizeof(float)) == 0;
+    };
+    if (a.type == mhw::kGeomSphere) return eqN(4);
+    if (a.type == mhw::kGeomCapsule || a.type == mhw::kGeomLineSweptSphere || a.type == mhw::kGeomCylinder) return eqN(7);
+    if (a.type == mhw::kGeomAABB || a.type == mhw::kGeomLineSegment) return eqN(6);
+    if (a.type == mhw::kGeomTriangle) return eqN(9);
+    if (a.type == mhw::kGeomOBB) {
+        static constexpr int kObbIdx[15] = {0,1,2, 4,5,6, 8,9,10, 12,13,14, 16,17,18};
+        for (int k : kObbIdx) {
+            if (std::memcmp(&a.p[k], &b.p[k], sizeof(float)) != 0) return false;
+        }
+        return true;
+    }
+    return true;
+}
+
+bool ShapesIdentical(const HistFrame& a,
+                     const PlayerFrameReadout& bPl,
+                     const ShapeRecord* bShapes,
+                     std::uint32_t bCount) noexcept {
+    if (a.shapes.size() != bCount) return false;
+    if (!SamePlayerReadout(a.mainPlDef, bPl)) return false;
+    for (std::uint32_t i = 0; i < bCount; ++i) {
+        if (!SameShapeRecord(a.shapes[i], bShapes[i])) return false;
+    }
+    return true;
+}
+
+void PushHistFrame(const RawSnapshot& snap,
+                   const ShapeRecord* shapes,
+                   std::uint32_t shapeCnt,
+                   freeze::Mode freezeMode) {
+    const std::uint32_t copyN = (shapeCnt <= kMaxShapesPerHistFrame) ? shapeCnt : kMaxShapesPerHistFrame;
+    if (freezeMode != freeze::Mode::None && g_hist.count > 0U) {
+        const std::uint32_t prevSlot = (g_hist.writePos + kMaxHistFrames - 1U) % kMaxHistFrames;
+        if (ShapesIdentical(g_hist.ring[prevSlot], snap.mainPlDef, shapes, copyN)) {
+            return;
+        }
+    }
+    HistFrame& dst = g_hist.ring[g_hist.writePos];
+    dst.mainPlDef = snap.mainPlDef;
+    dst.shapes.assign(shapes, shapes + copyN);
+    g_hist.writePos = (g_hist.writePos + 1U) % kMaxHistFrames;
+    if (g_hist.count < kMaxHistFrames) {
+        ++g_hist.count;
+    }
+}
+
+void UpdateHistoryCapture(bool visEnabled,
+                          freeze::Mode freezeMode,
+                          const app::ViewFilterState& vs,
+                          const RawSnapshot& snap) {
+    if (vs.histRecMode == app::HistRecordMode::Off) {
+        if (g_hist.count > 0U || g_hist.scrubOffset > 0U || g_hist.hasLastTick) {
+            ClearHistState();
+        }
+        return;
+    }
+
+    if (!snap.hasCamera) {
+        if (++g_hist.noCamFrames >= 20U) {
+            ClearHistState();
+            g_hist.lastPlPtr = 0;
+        }
+        return;
+    }
+    g_hist.noCamFrames = 0;
+
+    if (snap.mainPlPtr != 0) {
+        if (g_hist.lastPlPtr != 0 && g_hist.lastPlPtr != snap.mainPlPtr) {
+            ClearHistState();
+        }
+        g_hist.lastPlPtr = snap.mainPlPtr;
+    }
+
+    if (freezeMode == freeze::Mode::None) {
+        g_hist.scrubOffset = 0;
+    }
+    if (g_hist.count == 0U) {
+        g_hist.scrubOffset = 0;
+    } else if (g_hist.scrubOffset >= g_hist.count) {
+        g_hist.scrubOffset = g_hist.count - 1U;
+    }
+
+    const std::uint32_t fullEp  = freeze::FullStepEpoch();
+    const std::uint32_t worldEp = freeze::WorldStepEpoch();
+
+    // If visualization was off during live gameplay and simulation jumped ahead (>8 ticks),
+    // clear stale frames so Multi-Frame Stack never blends old-zone ghosts with live frames.
+    if (freezeMode == freeze::Mode::None && g_hist.hasLastTick && snap.mainPlPtr != 0 &&
+        (snap.mainPlMoveCount - g_hist.lastPlMove) > 8U) {
+        ClearHistState();
+    }
+
+    if (visEnabled && g_hist.scrubOffset == 0U) {
+        const bool enteredFull  = (freezeMode == freeze::Mode::Full  && g_hist.lastFreezeMode != freeze::Mode::Full);
+        const bool enteredWorld = (freezeMode == freeze::Mode::World && g_hist.lastFreezeMode != freeze::Mode::World);
+        if (enteredFull)  g_hist.lastFullEpoch  = fullEp;
+        if (enteredWorld) g_hist.lastWorldEpoch = worldEp;
+
+        bool shouldPush = false;
+        if (!g_hist.hasLastTick || g_hist.count == 0U) {
+            shouldPush = true;
+        } else if (freezeMode == freeze::Mode::None) {
+            shouldPush = (snap.mainPlMoveCount != g_hist.lastPlMove) ||
+                         (snap.emMoveCountSum != g_hist.lastEmMoveSum);
+        } else if (freezeMode == freeze::Mode::Full) {
+            shouldPush = (fullEp != g_hist.lastFullEpoch) ||
+                         (snap.mainPlMoveCount != g_hist.lastPlMove) ||
+                         (snap.emMoveCountSum != g_hist.lastEmMoveSum);
+        } else { // freeze::Mode::World
+            // Use WorldStepEpoch exclusively for [O] step detection so walking while pressing [O]
+            // never double-pushes across MoveLine boundary ticks!
+            const bool worldStepped = (worldEp != g_hist.lastWorldEpoch);
+            if (vs.histRecMode == app::HistRecordMode::AllInclWfMove) {
+                shouldPush = worldStepped || enteredWorld || (snap.mainPlMoveCount != g_hist.lastPlMove);
+            } else {
+                shouldPush = worldStepped ||
+                             (enteredWorld && ((snap.mainPlMoveCount != g_hist.lastPlMove) ||
+                                               (snap.emMoveCountSum != g_hist.lastEmMoveSum)));
+            }
+        }
+
+        if (shouldPush) {
+            PushHistFrame(snap, g_shapes, snap.shapeCount, freezeMode);
+            g_hist.lastPlMove     = snap.mainPlMoveCount;
+            g_hist.lastEmMoveSum  = snap.emMoveCountSum;
+            g_hist.lastFullEpoch  = fullEp;
+            g_hist.lastWorldEpoch = worldEp;
+            g_hist.hasLastTick    = true;
+        }
+    }
+
+    g_hist.lastFreezeMode = freezeMode;
+}
 
 inline bool IsCanonicalPtr(std::uintptr_t p) {
     return p >= 0x100000ULL && p <= 0x00007FFFFFFF0000ULL;
@@ -2231,6 +2426,8 @@ void HarvestMonstersWithPartFilter(std::uintptr_t sEnemy,
         }
         if (dup) continue;
 
+        snap.emMoveCountSum += *reinterpret_cast<const std::uint32_t*>(em + mhw::kOffUnitMoveCount);
+
         const std::uint32_t emId  = *reinterpret_cast<const std::uint32_t*>(em + mhw::kOffEmId);
         const std::uint32_t subId = *reinterpret_cast<const std::uint32_t*>(em + mhw::kOffEmSubId);
         const bool isLarge = (emId < mhw::kEmCategoryTableCount) && (catTbl[emId] == 1U || catTbl[emId] == 2U);
@@ -3147,6 +3344,9 @@ void CollectSnapshotSEH(std::uintptr_t exeBase,
     outSnap->hdrActive       = false;
     outSnap->hdrWhiteNits    = 200.0f;
     outSnap->mainPlDef       = PlayerFrameReadout{};
+    outSnap->mainPlPtr       = 0;
+    outSnap->mainPlMoveCount = 0;
+    outSnap->emMoveCountSum  = 0;
     g_emInspector            = EmInspectorSnapshot{};
 
     __try {
@@ -3191,6 +3391,8 @@ void CollectSnapshotSEH(std::uintptr_t exeBase,
             if (IsAlignedPtr(mainPl)) {
                 const std::uint8_t alive = *reinterpret_cast<const std::uint8_t*>(mainPl + mhw::kOffUnitAliveFlags);
                 if ((alive & 0x0EU) != 0) {
+                    outSnap->mainPlPtr       = mainPl;
+                    outSnap->mainPlMoveCount = *reinterpret_cast<const std::uint32_t*>(mainPl + mhw::kOffUnitMoveCount);
                     const std::uintptr_t plColl = *reinterpret_cast<const std::uintptr_t*>(mainPl + mhw::kOffUPlayerColl);
                     outSnap->mainPlDef = EvaluatePlayerDefense(mainPl, plColl);
 
@@ -5038,7 +5240,7 @@ void DrawInteractiveFilterPanel(std::vector<OverlayVertex>& outVerts,
         return;
     }
 
-    constexpr int kMainRows = 19;
+    constexpr int kMainRows = 23;
     const float ps     = px * 0.92f;
     const float padX   = 9.0f * resScale;
     const float padY   = 7.0f * resScale;
@@ -5047,7 +5249,7 @@ void DrawInteractiveFilterPanel(std::vector<OverlayVertex>& outVerts,
     const float ftrH   = 10.5f * ps;
     const float sepGap = 5.0f * resScale;
     const float panelW = 60.0f * 6.0f * ps + padX * 2.0f;
-    const float panelH = padY * 2.0f + hdrH + static_cast<float>(kMainRows) * rowH + sepGap * 3.0f + ftrH;
+    const float panelH = padY * 2.0f + hdrH + static_cast<float>(kMainRows) * rowH + sepGap * 4.0f + ftrH;
 
     // Panel background + left accent + top/bottom borders
     proj.emitRect2D(outVerts, x0, y0, x0 + panelW, y0 + panelH,
@@ -5098,7 +5300,11 @@ void DrawInteractiveFilterPanel(std::vector<OverlayVertex>& outVerts,
         {"[<>] ENTITY LINE WIDTH",     false, {0, 0, 0, 0}},
         {"[<>] SBC / RAW LINE WIDTH",  false, {0, 0, 0, 0}},
         {"[TAB] MONSTER PART FILTER",  true,  {0.18f, 0.96f, 0.52f, 0.96f}},
-        {"[<>] FREEZE DELAYED BURST",  false, {0, 0, 0, 0}}
+        {"[<>] FREEZE DELAYED BURST",  false, {0, 0, 0, 0}},
+        {"[<>] HISTORY RECORD",        false, {0, 0, 0, 0}},
+        {"[<>] HISTORY SCRUB (-/+1F)", false, {0, 0, 0, 0}},
+        {"[<>] MULTI-FRAME STACK",     false, {0, 0, 0, 0}},
+        {"[<>] STACK FILTER",          false, {0, 0, 0, 0}}
     };
 
     const std::uint32_t kRowBits[9] = {
@@ -5114,7 +5320,7 @@ void DrawInteractiveFilterPanel(std::vector<OverlayVertex>& outVerts,
     };
 
     for (int r = 0; r < kMainRows; ++r) {
-        if (r == 9 || r == 17 || r == 18) {
+        if (r == 9 || r == 17 || r == 18 || r == 19) {
             proj.emitRect2D(outVerts, x0 + padX, curY + 1.5f * resScale,
                             x0 + panelW - padX, curY + 2.5f * resScale,
                             csEnc.encode({0.22f, 0.30f, 0.42f, 0.80f}));
@@ -5205,6 +5411,33 @@ void DrawInteractiveFilterPanel(std::vector<OverlayVertex>& outVerts,
             const bool burstOn = freeze::IsWorldFreezeBurstEnabled();
             std::snprintf(valBuf, sizeof(valBuf), burstOn ? "< ON  >" : "< OFF >");
             vCol = burstOn ? colOn : colOff;
+        } else if (r == 19) {
+            std::snprintf(valBuf, sizeof(valBuf), "< %s >", app::HistRecordModeName(vs.histRecMode));
+            vCol = (vs.histRecMode == app::HistRecordMode::Off) ? colOff : colOn;
+        } else if (r == 20) {
+            if (g_hist.scrubOffset > 0U && g_hist.count > 0U) {
+                std::snprintf(valBuf, sizeof(valBuf), "< T-%uF / %uF >", g_hist.scrubOffset, g_hist.count);
+                vCol = colValue;
+            } else if (g_hist.count > 0U) {
+                std::snprintf(valBuf, sizeof(valBuf), "< LIVE (%uF) >", g_hist.count);
+                vCol = colOn;
+            } else {
+                std::snprintf(valBuf, sizeof(valBuf), "< EMPTY (0F) >");
+                vCol = colOff;
+            }
+        } else if (r == 21) {
+            const int stF = app::HistStackFramesFromIdx(vs.histStackIdx);
+            if (stF > 0) {
+                std::snprintf(valBuf, sizeof(valBuf), "< %dF >", stF);
+                vCol = colValue;
+            } else {
+                std::snprintf(valBuf, sizeof(valBuf), "< OFF >");
+                vCol = colOff;
+            }
+        } else if (r == 22) {
+            const bool stackActive = (app::HistStackFramesFromIdx(vs.histStackIdx) > 0);
+            std::snprintf(valBuf, sizeof(valBuf), "< %s >", app::HistStackScopeName(vs.histStackScope));
+            vCol = stackActive ? colHeader : colOff;
         }
 
         DrawText5x7(outVerts, proj, valX, curY + 1.0f * ps, ps, valBuf, vCol);
@@ -5218,10 +5451,297 @@ void DrawInteractiveFilterPanel(std::vector<OverlayVertex>& outVerts,
                 "ARROWS/DPAD:NAV  SPACE/A:SET  TAB:PARTS  1-0/-///,/./=:KB", colFooter);
 }
 
+bool MatchesStackScope(VolumeCat cat, app::HistStackScope scope) noexcept {
+    switch (scope) {
+        case app::HistStackScope::HitboxOnly:
+            return cat == VolumeCat::MonsterHitbox || cat == VolumeCat::PlayerHitbox ||
+                   cat == VolumeCat::OtomoHitbox   || cat == VolumeCat::EnvHitbox;
+        case app::HistStackScope::AtkAndPlHurt:
+            return cat == VolumeCat::MonsterHitbox || cat == VolumeCat::PlayerHitbox ||
+                   cat == VolumeCat::OtomoHitbox   || cat == VolumeCat::EnvHitbox ||
+                   cat == VolumeCat::PlayerHurtbox;
+        case app::HistStackScope::HurtboxOnly:
+            return cat == VolumeCat::MonsterHurtbox || cat == VolumeCat::PlayerHurtbox ||
+                   cat == VolumeCat::OtomoHurtbox   || cat == VolumeCat::EnvHurtbox;
+        case app::HistStackScope::AllEntities:
+        default:
+            return true;
+    }
+}
+
+void EmitEntityShapes(std::vector<OverlayVertex>& outVerts,
+                      const LineProjector& proj,
+                      const ColorSpaceEncoder& csEnc,
+                      const ShapeRecord* shapes,
+                      std::uint32_t shapeCount,
+                      const app::ViewFilterState& viewState,
+                      float entityHalfThick,
+                      bool use3DShade,
+                      bool activeHideEm,
+                      float alphaMul,
+                      bool isTrail,
+                      float ageT,
+                      float ageAlphaMul,
+                      float ageThickMul,
+                      float ageFillMul,
+                      std::uint32_t& ioTrailBudgetLeft) {
+    if (!shapes || shapeCount == 0U) return;
+    if (isTrail && ioTrailBudgetLeft == 0U) return;
+
+    auto clampA = [&](float a) -> float {
+        const float v = a * alphaMul;
+        return (v > 1.0f) ? 1.0f : ((v < 0.012f) ? 0.012f : v);
+    };
+    auto makeCol = [&](Color4 srgb) -> Color4 {
+        if (isTrail) {
+            srgb.a *= ageAlphaMul;
+            if (srgb.a < 0.012f) srgb.a = 0.012f;
+        }
+        return csEnc.encode(srgb);
+    };
+
+    const float htMonsterAtk  = entityHalfThick * 1.45f * (isTrail ? ageThickMul : 1.0f);
+    const float htPlayerAtk   = entityHalfThick * 1.35f * (isTrail ? ageThickMul : 1.0f);
+    const float htOtomoAtk    = entityHalfThick * 1.15f * (isTrail ? ageThickMul : 1.0f);
+    const float htEnvAtk      = entityHalfThick * 1.30f * (isTrail ? ageThickMul : 1.0f);
+    const float htMonsterHurt = entityHalfThick * 0.90f * (isTrail ? ageThickMul : 1.0f);
+    const float htOtomoHurt   = entityHalfThick * 0.85f * (isTrail ? ageThickMul : 1.0f);
+    const float htEnvHurt     = entityHalfThick * 0.95f * (isTrail ? ageThickMul : 1.0f);
+    const float htPushbox     = entityHalfThick * 0.75f * (isTrail ? ageThickMul : 1.0f);
+    const float htEnvPush     = entityHalfThick * 0.70f * (isTrail ? ageThickMul : 1.0f);
+    const float htEmGhost     = entityHalfThick * 0.48f * (isTrail ? ageThickMul : 1.0f);
+
+    const Color4 colMonsterAtk = isTrail
+        ? makeCol({1.00f, 0.16f + 0.42f * ageT, 0.18f - 0.04f * ageT, clampA(0.95f)})
+        : makeCol({1.00f, 0.16f, 0.18f, clampA(0.95f)});
+    const Color4 colPlayerAtk = isTrail
+        ? makeCol({1.00f - 0.04f * ageT, 0.86f + 0.10f * ageT, 0.10f + 0.52f * ageT, clampA(0.95f)})
+        : makeCol({1.00f, 0.86f, 0.10f, clampA(0.95f)});
+    const Color4 colOtomoAtk    = makeCol({1.00f, 0.72f, 0.22f, clampA(0.90f)});
+    const Color4 colEnvAtk      = makeCol({1.00f, 0.48f, 0.12f, clampA(0.94f)});
+    const Color4 colMonsterHurt = makeCol({0.15f, 0.95f, 0.38f, clampA(0.72f)});
+    const Color4 colOtomoHurt   = makeCol({0.38f, 0.78f, 1.00f, clampA(0.75f)});
+    const Color4 colEnvHurt     = makeCol({0.22f, 0.94f, 0.76f, clampA(0.84f)});
+    const Color4 colPushbox     = makeCol({0.72f, 0.56f, 1.00f, clampA(0.42f)});
+    const Color4 colEnvPush     = makeCol({0.46f, 0.62f, 0.84f, clampA(0.45f)});
+    const Color4 colEmGhostHurt = makeCol({0.58f, 0.68f, 0.78f, clampA(0.14f)});
+    const Color4 colEmGhostPush = makeCol({0.62f, 0.58f, 0.78f, clampA(0.10f)});
+
+    Color4 colEmPartHurt[18]{};
+    Color4 colEmPartPush[18]{};
+    if (viewState.emPartMode != app::EmPartMode::Off) {
+        for (int c = 0; c < 18; ++c) {
+            const float r = kEmPartPaletteSrgb[c][0];
+            const float g = kEmPartPaletteSrgb[c][1];
+            const float b = kEmPartPaletteSrgb[c][2];
+            const float hurtA = (c == static_cast<int>(kEmNoClawColorIdx)) ? 0.54f : 0.84f;
+            const float pushA = (c == static_cast<int>(kEmNoClawColorIdx)) ? 0.30f : 0.46f;
+            colEmPartHurt[c] = makeCol({r, g, b, clampA(hurtA)});
+            colEmPartPush[c] = makeCol({
+                0.65f * r + 0.35f * 0.84f,
+                0.65f * g + 0.35f * 0.78f,
+                0.65f * b + 0.35f * 1.00f,
+                clampA(pushA)
+            });
+        }
+    }
+
+    Color4 colPlDef[7]{};
+    float  htPlDef[7]{};
+    for (int d = 0; d < 7; ++d) {
+        const float a = (d == 0) ? clampA(0.82f) : clampA(0.96f);
+        Color4 srgb = PlayerDefSrgbColor(static_cast<PlayerDefState>(d), a, entityHalfThick, htPlDef[d]);
+        if (isTrail) {
+            htPlDef[d] *= ageThickMul;
+        }
+        colPlDef[d] = makeCol(srgb);
+    }
+
+    for (int pass = 0; pass < static_cast<int>(VolumeCat::Count); ++pass) {
+        const auto wantCat = static_cast<VolumeCat>(pass);
+        if ((CategoryBitForVolume(wantCat) & viewState.visMask) == 0U) continue;
+        if (isTrail && !MatchesStackScope(wantCat, viewState.histStackScope)) continue;
+
+        const int startGhost = isTrail ? 1 : 0;
+        for (int ghostSub = startGhost; ghostSub < 2; ++ghostSub) {
+            const bool wantGhost = (ghostSub == 0);
+
+            for (std::uint32_t i = 0; i < shapeCount; ++i) {
+                const ShapeRecord& s = shapes[i];
+                if (s.cat != wantCat) continue;
+                const bool isGhost = ((s.emFlags & kEmFlagGhost) != 0U);
+                if (isGhost != wantGhost) continue;
+
+                if (isTrail) {
+                    if (ioTrailBudgetLeft == 0U) return;
+                    --ioTrailBudgetLeft;
+                }
+
+                Color4 col{};
+                float halfThick = entityHalfThick * (isTrail ? ageThickMul : 1.0f);
+                float fillRatio = 0.0f;
+                switch (wantCat) {
+                    case VolumeCat::MonsterHitbox:
+                        col = colMonsterAtk; halfThick = htMonsterAtk; fillRatio = 0.13f; break;
+                    case VolumeCat::PlayerHitbox:
+                        col = colPlayerAtk; halfThick = htPlayerAtk; fillRatio = 0.11f; break;
+                    case VolumeCat::OtomoHitbox:
+                        col = colOtomoAtk; halfThick = htOtomoAtk; fillRatio = 0.09f; break;
+                    case VolumeCat::EnvHitbox:
+                        col = colEnvAtk; halfThick = htEnvAtk; fillRatio = 0.12f; break;
+                    case VolumeCat::MonsterHurtbox:
+                        if (isGhost) {
+                            col = colEmGhostHurt;
+                            halfThick = htEmGhost;
+                            fillRatio = 0.0f;
+                        } else if (viewState.emPartMode != app::EmPartMode::Off && s.emPartIdx != kEmPartNone) {
+                            const std::uint8_t ci = (s.emPartIdx < 18U) ? s.emPartIdx : 0U;
+                            col = colEmPartHurt[ci];
+                            halfThick = ((ci == kEmNoClawColorIdx) ? (entityHalfThick * 0.78f) : (entityHalfThick * 0.98f)) *
+                                        (isTrail ? ageThickMul : 1.0f);
+                            fillRatio = (activeHideEm || viewState.backdrop == app::BackdropMode::HideAll3D)
+                                            ? 0.08f : 0.0f;
+                        } else {
+                            col = colMonsterHurt;
+                            halfThick = htMonsterHurt;
+                            fillRatio = (activeHideEm || viewState.backdrop == app::BackdropMode::HideAll3D)
+                                            ? 0.07f : 0.0f;
+                        }
+                        break;
+                    case VolumeCat::OtomoHurtbox:
+                        col = colOtomoHurt; halfThick = htOtomoHurt; break;
+                    case VolumeCat::EnvHurtbox:
+                        col = colEnvHurt; halfThick = htEnvHurt;
+                        fillRatio = (viewState.stageHide == app::StageHideMode::HideAll ||
+                                     viewState.backdrop == app::BackdropMode::HideAll3D)
+                                        ? 0.09f : 0.0f;
+                        break;
+                    case VolumeCat::PlayerHurtbox: {
+                        const int di = (static_cast<int>(s.plDef) >= 0 && static_cast<int>(s.plDef) < 7)
+                                           ? static_cast<int>(s.plDef) : 0;
+                        col = colPlDef[di];
+                        halfThick = htPlDef[di];
+                        fillRatio = (di != 0) ? 0.11f : 0.0f;
+                        break;
+                    }
+                    case VolumeCat::EnvPush:
+                        col = colEnvPush; halfThick = htEnvPush; break;
+                    default:
+                        if (isGhost) {
+                            col = colEmGhostPush;
+                            halfThick = htEmGhost * 0.90f;
+                        } else if (viewState.emPartMode != app::EmPartMode::Off && s.emPartIdx != kEmPartNone) {
+                            const std::uint8_t ci = (s.emPartIdx < 18U) ? s.emPartIdx : 0U;
+                            col = colEmPartPush[ci];
+                            halfThick = htPushbox;
+                        } else {
+                            col = colPushbox;
+                            halfThick = htPushbox;
+                        }
+                        break;
+                }
+
+                if (isTrail) {
+                    fillRatio *= ageFillMul;
+                }
+
+                if (s.type == mhw::kGeomSphere) {
+                    EmitSphere(outVerts, proj, {s.p[0], s.p[1], s.p[2]}, s.p[3],
+                               halfThick, col, use3DShade, fillRatio);
+                } else if (s.type == mhw::kGeomCapsule || s.type == mhw::kGeomLineSweptSphere) {
+                    EmitCapsuleOrCylinder(outVerts, proj,
+                                          {s.p[0], s.p[1], s.p[2]},
+                                          {s.p[3], s.p[4], s.p[5]},
+                                          s.p[6], true, halfThick, col, use3DShade, fillRatio);
+                } else if (s.type == mhw::kGeomCylinder) {
+                    EmitCapsuleOrCylinder(outVerts, proj,
+                                          {s.p[0], s.p[1], s.p[2]},
+                                          {s.p[3], s.p[4], s.p[5]},
+                                          s.p[6], false, halfThick, col, use3DShade, fillRatio);
+                } else if (s.type == mhw::kGeomOBB) {
+                    const Vec3 ax{s.p[0] * s.p[16], s.p[1] * s.p[16], s.p[2] * s.p[16]};
+                    const Vec3 ay{s.p[4] * s.p[17], s.p[5] * s.p[17], s.p[6] * s.p[17]};
+                    const Vec3 az{s.p[8] * s.p[18], s.p[9] * s.p[18], s.p[10] * s.p[18]};
+                    const Vec3 ct{s.p[12], s.p[13], s.p[14]};
+                    Vec3 corners[8];
+                    for (int k = 0; k < 8; ++k) {
+                        const float sx = (k & 1) ? 1.0f : -1.0f;
+                        const float sy = (k & 2) ? 1.0f : -1.0f;
+                        const float sz = (k & 4) ? 1.0f : -1.0f;
+                        corners[k] = {
+                            ct.x + sx * ax.x + sy * ay.x + sz * az.x,
+                            ct.y + sx * ax.y + sy * ay.y + sz * az.y,
+                            ct.z + sx * ax.z + sy * ay.z + sz * az.z
+                        };
+                    }
+                    EmitBoxCorners(outVerts, proj, corners, halfThick, col, use3DShade, fillRatio);
+                } else if (s.type == mhw::kGeomAABB) {
+                    const float x0 = s.p[0], y0 = s.p[1], z0 = s.p[2];
+                    const float x1 = s.p[3], y1 = s.p[4], z1 = s.p[5];
+                    const Vec3 corners[8] = {
+                        {x0,y0,z0}, {x1,y0,z0}, {x0,y1,z0}, {x1,y1,z0},
+                        {x0,y0,z1}, {x1,y0,z1}, {x0,y1,z1}, {x1,y1,z1}
+                    };
+                    EmitBoxCorners(outVerts, proj, corners, halfThick, col, use3DShade, fillRatio);
+                } else if (s.type == mhw::kGeomTriangle) {
+                    const Vec3 v0{s.p[0], s.p[1], s.p[2]};
+                    const Vec3 v1{s.p[3], s.p[4], s.p[5]};
+                    const Vec3 v2{s.p[6], s.p[7], s.p[8]};
+                    if (fillRatio > 0.001f && use3DShade) {
+                        Color4 fc = col; fc.a *= fillRatio;
+                        proj.addTri3D(outVerts, v0, v1, v2, fc);
+                    }
+                    proj.addDepthLine3D(outVerts, v0, v1, halfThick, col, 0.0f, 0.0f, false);
+                    proj.addDepthLine3D(outVerts, v1, v2, halfThick, col, 0.0f, 0.0f, false);
+                    proj.addDepthLine3D(outVerts, v2, v0, halfThick, col, 0.0f, 0.0f, false);
+                } else if (s.type == mhw::kGeomLineSegment) {
+                    proj.addDepthLine3D(outVerts,
+                                        {s.p[0], s.p[1], s.p[2]},
+                                        {s.p[3], s.p[4], s.p[5]},
+                                        halfThick, col, 0.0f, 0.0f, false);
+                }
+            }
+        }
+    }
+}
+
 } // namespace
 
 EmInspectorCounts GetLastEmInspectorCounts() noexcept {
     return g_lastEmCounts;
+}
+
+std::uint32_t HistFrameCount() noexcept {
+    return g_hist.count;
+}
+
+std::uint32_t HistScrubOffset() noexcept {
+    return g_hist.scrubOffset;
+}
+
+bool HistStepBack(std::uint32_t delta) noexcept {
+    if (g_hist.count <= 1U || delta == 0U) return false;
+    const std::uint32_t maxOff = g_hist.count - 1U;
+    if (g_hist.scrubOffset >= maxOff) return false;
+    const std::uint32_t next = g_hist.scrubOffset + delta;
+    g_hist.scrubOffset = (next > maxOff) ? maxOff : next;
+    return true;
+}
+
+bool HistStepForward(std::uint32_t delta) noexcept {
+    if (g_hist.scrubOffset == 0U || delta == 0U) return false;
+    g_hist.scrubOffset = (delta >= g_hist.scrubOffset) ? 0U : (g_hist.scrubOffset - delta);
+    return true;
+}
+
+void HistJumpLive() noexcept {
+    g_hist.scrubOffset = 0U;
+}
+
+void ResetHistory() noexcept {
+    ClearHistState();
+    g_hist.lastPlPtr   = 0;
+    g_hist.noCamFrames = 0;
 }
 
 void BuildOverlayFrame(std::uintptr_t exeBase,
@@ -5265,8 +5785,31 @@ void BuildOverlayFrame(std::uintptr_t exeBase,
     RawSnapshot snap{};
     CollectSnapshotSEH(exeBase, exeEnd, visEnabled, viewState, sbcRadiusWorldUnits,
                        includeAuxSbc, &snap);
+    UpdateHistoryCapture(visEnabled, freezeMode, viewState, snap);
+
+    const std::uint32_t scrub = g_hist.scrubOffset;
+    const bool showingHistFocal = visEnabled && (scrub > 0U && scrub < g_hist.count);
+    const std::uint32_t latestSlot = (g_hist.count > 0U)
+                                         ? ((g_hist.writePos + kMaxHistFrames - 1U) % kMaxHistFrames)
+                                         : 0U;
+    const ShapeRecord* focalShapes = g_shapes;
+    std::uint32_t focalCount = snap.shapeCount;
+    PlayerFrameReadout activePlDef = snap.mainPlDef;
+    if (showingHistFocal) {
+        const std::uint32_t focusSlot = (latestSlot + kMaxHistFrames - scrub) % kMaxHistFrames;
+        focalShapes = g_hist.ring[focusSlot].shapes.data();
+        focalCount  = static_cast<std::uint32_t>(g_hist.ring[focusSlot].shapes.size());
+        activePlDef = g_hist.ring[focusSlot].mainPlDef;
+    }
+
+    const std::uint32_t wantedStack = static_cast<std::uint32_t>(app::HistStackFramesFromIdx(viewState.histStackIdx));
+    const std::uint32_t availOlder  = (visEnabled && g_hist.count > scrub + 1U)
+                                          ? (g_hist.count - 1U - scrub)
+                                          : 0U;
+    const std::uint32_t trailFrames = (wantedStack < availOlder) ? wantedStack : availOlder;
+
     outStats.hasCamera   = snap.hasCamera;
-    outStats.totalShapes = snap.shapeCount;
+    outStats.totalShapes = focalCount;
     outStats.sbcEdges    = snap.sbcEdgeCount;
     if (snap.hasCamera) {
         const float m32 = std::fabs(snap.proj[14]);
@@ -5403,11 +5946,12 @@ void BuildOverlayFrame(std::uintptr_t exeBase,
 
     // 2. 3D Stage .SBC Shaded Terrain + Ground Metric Radar Rings + Depth-Cued Entity Volumes
     if (visEnabled && snap.hasCamera &&
-        (snap.sbcTriCount > 0 || snap.sbcEdgeCount > 0 || snap.shapeCount > 0 || showRings)) {
+        (snap.sbcTriCount > 0 || snap.sbcEdgeCount > 0 || focalCount > 0 || trailFrames > 0 || showRings)) {
         outVerts.reserve(outVerts.size() +
                          static_cast<std::size_t>(snap.sbcTriCount) * 2 +
                          static_cast<std::size_t>(snap.sbcEdgeCount) * 2 +
-                         static_cast<std::size_t>(snap.shapeCount) * 180 +
+                         static_cast<std::size_t>(focalCount) * 180 +
+                         static_cast<std::size_t>(trailFrames) * 1200 +
                          2048);
 
         // 2a. Lit 3D Shaded .SBC Surfaces (Opaque Z-Buffered OR Semi-Transparent Painter's Sort) + Creases
@@ -5854,62 +6398,16 @@ void BuildOverlayFrame(std::uintptr_t exeBase,
         // End of Pass 2: [opaqueTriVerts .. sceneDepthEndVert) is tested against MHW's 3D tDepthMap in ALL modes!
         outStats.sceneDepthEndVert = static_cast<std::uint32_t>(outVerts.size());
 
-        // 2c. Draw Entity Collision Volumes (ordered back-to-front by VolumeCat, with 3D front/back depth cue!)
+        // 2c. Draw Entity Collision Volumes (Multi-Frame Onion-Skin trails oldest->newest, then focal frame on top!)
         proj.zBiasCm = (outStats.opaqueTriVerts > 0) ? 18.0f : 0.0f;
-        if (snap.shapeCount > 0) {
-            const float htMonsterAtk  = entityHalfThick * 1.45f;
-            const float htPlayerAtk   = entityHalfThick * 1.35f;
-            const float htOtomoAtk    = entityHalfThick * 1.15f;
-            const float htEnvAtk      = entityHalfThick * 1.30f;
-            const float htMonsterHurt = entityHalfThick * 0.90f;
-            const float htOtomoHurt   = entityHalfThick * 0.85f;
-            const float htEnvHurt     = entityHalfThick * 0.95f;
-            const float htPushbox     = entityHalfThick * 0.75f;
-            const float htEnvPush     = entityHalfThick * 0.70f;
-            const float htEmGhost     = entityHalfThick * 0.48f;
-
-            const Color4 colMonsterAtk  = csEnc.encode({1.00f, 0.16f, 0.18f, clampA(0.95f)});
-            const Color4 colPlayerAtk   = csEnc.encode({1.00f, 0.86f, 0.10f, clampA(0.95f)});
-            const Color4 colOtomoAtk    = csEnc.encode({1.00f, 0.72f, 0.22f, clampA(0.90f)});
-            const Color4 colEnvAtk      = csEnc.encode({1.00f, 0.48f, 0.12f, clampA(0.94f)});
-            const Color4 colMonsterHurt = csEnc.encode({0.15f, 0.95f, 0.38f, clampA(0.72f)});
-            const Color4 colOtomoHurt   = csEnc.encode({0.38f, 0.78f, 1.00f, clampA(0.75f)});
-            const Color4 colEnvHurt     = csEnc.encode({0.22f, 0.94f, 0.76f, clampA(0.84f)});
-            const Color4 colPushbox     = csEnc.encode({0.72f, 0.56f, 1.00f, clampA(0.42f)});
-            const Color4 colEnvPush     = csEnc.encode({0.46f, 0.62f, 0.84f, clampA(0.45f)});
-            const Color4 colEmGhostHurt = csEnc.encode({0.58f, 0.68f, 0.78f, clampA(0.14f)});
-            const Color4 colEmGhostPush = csEnc.encode({0.62f, 0.58f, 0.78f, clampA(0.10f)});
-
-            Color4 colEmPartHurt[18]{};
-            Color4 colEmPartPush[18]{};
-            if (viewState.emPartMode != app::EmPartMode::Off) {
-                for (int c = 0; c < 18; ++c) {
-                    const float r = kEmPartPaletteSrgb[c][0];
-                    const float g = kEmPartPaletteSrgb[c][1];
-                    const float b = kEmPartPaletteSrgb[c][2];
-                    const float hurtA = (c == static_cast<int>(kEmNoClawColorIdx)) ? 0.54f : 0.84f;
-                    const float pushA = (c == static_cast<int>(kEmNoClawColorIdx)) ? 0.30f : 0.46f;
-                    colEmPartHurt[c] = csEnc.encode({r, g, b, clampA(hurtA)});
-                    // Soft pastel tint of the same part hue for bound Pushboxes so Hurtbox vs Pushbox stay distinct
-                    colEmPartPush[c] = csEnc.encode({
-                        0.65f * r + 0.35f * 0.84f,
-                        0.65f * g + 0.35f * 0.78f,
-                        0.65f * b + 0.35f * 1.00f,
-                        clampA(pushA)
-                    });
-                }
-            }
-
-            Color4 colPlDef[7]{};
-            float  htPlDef[7]{};
-            for (int d = 0; d < 7; ++d) {
-                const float a = (d == 0) ? clampA(0.82f) : clampA(0.96f);
-                colPlDef[d] = csEnc.encode(PlayerDefSrgbColor(static_cast<PlayerDefState>(d), a, entityHalfThick, htPlDef[d]));
-            }
-
-            for (std::uint32_t i = 0; i < snap.shapeCount; ++i) {
-                if ((g_shapes[i].emFlags & kEmFlagGhost) != 0U) continue;
-                switch (g_shapes[i].cat) {
+        if (focalCount > 0 || trailFrames > 0) {
+            std::uint32_t visibleTotal = 0;
+            for (std::uint32_t i = 0; i < focalCount; ++i) {
+                const ShapeRecord& s = focalShapes[i];
+                if ((CategoryBitForVolume(s.cat) & viewState.visMask) == 0U) continue;
+                ++visibleTotal;
+                if ((s.emFlags & kEmFlagGhost) != 0U) continue;
+                switch (s.cat) {
                     case VolumeCat::MonsterHitbox:  ++outStats.monsterHitbox;  break;
                     case VolumeCat::PlayerHitbox:   ++outStats.playerHitboxes; break;
                     case VolumeCat::MonsterHurtbox: ++outStats.monsterHurtbox; break;
@@ -5920,143 +6418,28 @@ void BuildOverlayFrame(std::uintptr_t exeBase,
                     default:                        ++outStats.otherShapes;    break;
                 }
             }
+            outStats.totalShapes = visibleTotal;
 
-            for (int pass = 0; pass < static_cast<int>(VolumeCat::Count); ++pass) {
-                const auto wantCat = static_cast<VolumeCat>(pass);
-
-                // Sub-pass 0 draws faint ghost outlines first; sub-pass 1 draws selected active parts on top!
-                for (int ghostSub = 0; ghostSub < 2; ++ghostSub) {
-                    const bool wantGhost = (ghostSub == 0);
-
-                    for (std::uint32_t i = 0; i < snap.shapeCount; ++i) {
-                        const ShapeRecord& s = g_shapes[i];
-                        if (s.cat != wantCat) continue;
-                        const bool isGhost = ((s.emFlags & kEmFlagGhost) != 0U);
-                        if (isGhost != wantGhost) continue;
-
-                        Color4 col{};
-                        float halfThick = entityHalfThick;
-                        float fillRatio = 0.0f;
-                        switch (wantCat) {
-                            case VolumeCat::MonsterHitbox:
-                                col = colMonsterAtk; halfThick = htMonsterAtk; fillRatio = 0.13f; break;
-                            case VolumeCat::PlayerHitbox:
-                                col = colPlayerAtk; halfThick = htPlayerAtk; fillRatio = 0.11f; break;
-                            case VolumeCat::OtomoHitbox:
-                                col = colOtomoAtk; halfThick = htOtomoAtk; fillRatio = 0.09f; break;
-                            case VolumeCat::EnvHitbox:
-                                col = colEnvAtk; halfThick = htEnvAtk; fillRatio = 0.12f; break;
-                            case VolumeCat::MonsterHurtbox:
-                                if (isGhost) {
-                                    col = colEmGhostHurt;
-                                    halfThick = htEmGhost;
-                                    fillRatio = 0.0f;
-                                } else if (viewState.emPartMode != app::EmPartMode::Off && s.emPartIdx != kEmPartNone) {
-                                    const std::uint8_t ci = (s.emPartIdx < 18U) ? s.emPartIdx : 0U;
-                                    col = colEmPartHurt[ci];
-                                    halfThick = (ci == kEmNoClawColorIdx)
-                                                    ? (entityHalfThick * 0.78f)
-                                                    : (entityHalfThick * 0.98f);
-                                    fillRatio = (activeHideEm || viewState.backdrop == app::BackdropMode::HideAll3D)
-                                                    ? 0.08f : 0.0f;
-                                } else {
-                                    col = colMonsterHurt;
-                                    halfThick = htMonsterHurt;
-                                    fillRatio = (activeHideEm || viewState.backdrop == app::BackdropMode::HideAll3D)
-                                                    ? 0.07f : 0.0f;
-                                }
-                                break;
-                            case VolumeCat::OtomoHurtbox:
-                                col = colOtomoHurt; halfThick = htOtomoHurt; break;
-                            case VolumeCat::EnvHurtbox:
-                                col = colEnvHurt; halfThick = htEnvHurt;
-                                fillRatio = (viewState.stageHide == app::StageHideMode::HideAll ||
-                                             viewState.backdrop == app::BackdropMode::HideAll3D)
-                                                ? 0.09f : 0.0f;
-                                break;
-                            case VolumeCat::PlayerHurtbox: {
-                                const int di = (static_cast<int>(s.plDef) >= 0 && static_cast<int>(s.plDef) < 7)
-                                                   ? static_cast<int>(s.plDef) : 0;
-                                col = colPlDef[di];
-                                halfThick = htPlDef[di];
-                                fillRatio = (di != 0) ? 0.11f : 0.0f;
-                                break;
-                            }
-                            case VolumeCat::EnvPush:
-                                col = colEnvPush; halfThick = htEnvPush; break;
-                            default:
-                                if (isGhost) {
-                                    col = colEmGhostPush;
-                                    halfThick = htEmGhost * 0.90f;
-                                } else if (viewState.emPartMode != app::EmPartMode::Off && s.emPartIdx != kEmPartNone) {
-                                    const std::uint8_t ci = (s.emPartIdx < 18U) ? s.emPartIdx : 0U;
-                                    col = colEmPartPush[ci];
-                                    halfThick = htPushbox;
-                                } else {
-                                    col = colPushbox;
-                                    halfThick = htPushbox;
-                                }
-                                break;
-                        }
-
-                        if (s.type == mhw::kGeomSphere) {
-                            EmitSphere(outVerts, proj, {s.p[0], s.p[1], s.p[2]}, s.p[3],
-                                       halfThick, col, use3DShade, fillRatio);
-                        } else if (s.type == mhw::kGeomCapsule || s.type == mhw::kGeomLineSweptSphere) {
-                            EmitCapsuleOrCylinder(outVerts, proj,
-                                                  {s.p[0], s.p[1], s.p[2]},
-                                                  {s.p[3], s.p[4], s.p[5]},
-                                                  s.p[6], true, halfThick, col, use3DShade, fillRatio);
-                        } else if (s.type == mhw::kGeomCylinder) {
-                            EmitCapsuleOrCylinder(outVerts, proj,
-                                                  {s.p[0], s.p[1], s.p[2]},
-                                                  {s.p[3], s.p[4], s.p[5]},
-                                                  s.p[6], false, halfThick, col, use3DShade, fillRatio);
-                        } else if (s.type == mhw::kGeomOBB) {
-                            const Vec3 ax{s.p[0] * s.p[16], s.p[1] * s.p[16], s.p[2] * s.p[16]};
-                            const Vec3 ay{s.p[4] * s.p[17], s.p[5] * s.p[17], s.p[6] * s.p[17]};
-                            const Vec3 az{s.p[8] * s.p[18], s.p[9] * s.p[18], s.p[10] * s.p[18]};
-                            const Vec3 ct{s.p[12], s.p[13], s.p[14]};
-                            Vec3 corners[8];
-                            for (int k = 0; k < 8; ++k) {
-                                const float sx = (k & 1) ? 1.0f : -1.0f;
-                                const float sy = (k & 2) ? 1.0f : -1.0f;
-                                const float sz = (k & 4) ? 1.0f : -1.0f;
-                                corners[k] = {
-                                    ct.x + sx * ax.x + sy * ay.x + sz * az.x,
-                                    ct.y + sx * ax.y + sy * ay.y + sz * az.y,
-                                    ct.z + sx * ax.z + sy * ay.z + sz * az.z
-                                };
-                            }
-                            EmitBoxCorners(outVerts, proj, corners, halfThick, col, use3DShade, fillRatio);
-                        } else if (s.type == mhw::kGeomAABB) {
-                            const float x0 = s.p[0], y0 = s.p[1], z0 = s.p[2];
-                            const float x1 = s.p[3], y1 = s.p[4], z1 = s.p[5];
-                            const Vec3 corners[8] = {
-                                {x0,y0,z0}, {x1,y0,z0}, {x0,y1,z0}, {x1,y1,z0},
-                                {x0,y0,z1}, {x1,y0,z1}, {x0,y1,z1}, {x1,y1,z1}
-                            };
-                            EmitBoxCorners(outVerts, proj, corners, halfThick, col, use3DShade, fillRatio);
-                        } else if (s.type == mhw::kGeomTriangle) {
-                            const Vec3 v0{s.p[0], s.p[1], s.p[2]};
-                            const Vec3 v1{s.p[3], s.p[4], s.p[5]};
-                            const Vec3 v2{s.p[6], s.p[7], s.p[8]};
-                            if (fillRatio > 0.001f && use3DShade) {
-                                Color4 fc = col; fc.a *= fillRatio;
-                                proj.addTri3D(outVerts, v0, v1, v2, fc);
-                            }
-                            proj.addDepthLine3D(outVerts, v0, v1, halfThick, col, 0.0f, 0.0f, false);
-                            proj.addDepthLine3D(outVerts, v1, v2, halfThick, col, 0.0f, 0.0f, false);
-                            proj.addDepthLine3D(outVerts, v2, v0, halfThick, col, 0.0f, 0.0f, false);
-                        } else if (s.type == mhw::kGeomLineSegment) {
-                            proj.addDepthLine3D(outVerts,
-                                                {s.p[0], s.p[1], s.p[2]},
-                                                {s.p[3], s.p[4], s.p[5]},
-                                                halfThick, col, 0.0f, 0.0f, false);
-                        }
-                    }
-                }
+            std::uint32_t trailBudgetLeft = kMaxTrailShapesBudget;
+            for (std::uint32_t age = trailFrames; age >= 1U; --age) {
+                const std::uint32_t slot = (latestSlot + kMaxHistFrames - (scrub + age)) % kMaxHistFrames;
+                const HistFrame& hf = g_hist.ring[slot];
+                if (hf.shapes.empty()) continue;
+                const float ageT        = static_cast<float>(age) / static_cast<float>(trailFrames + 1U);
+                const float ageAlphaMul = 0.64f * (1.0f - 0.78f * ageT);
+                const float ageThickMul = 0.78f - 0.32f * ageT;
+                const float ageFillMul  = 0.42f * (1.0f - 0.60f * ageT);
+                EmitEntityShapes(outVerts, proj, csEnc,
+                                 hf.shapes.data(), static_cast<std::uint32_t>(hf.shapes.size()),
+                                 viewState, entityHalfThick, use3DShade, activeHideEm, alphaMul,
+                                 true, ageT, ageAlphaMul, ageThickMul, ageFillMul, trailBudgetLeft);
             }
+
+            std::uint32_t dummyBudget = 0;
+            EmitEntityShapes(outVerts, proj, csEnc,
+                             focalShapes, focalCount,
+                             viewState, entityHalfThick, use3DShade, activeHideEm, alphaMul,
+                             false, 0.0f, 1.0f, 1.0f, 1.0f, dummyBudget);
         }
 
         // End of Pass 3a: [sceneDepthEndVert .. worldOverlayEndVert) 3D entity wireframes
@@ -6066,7 +6449,7 @@ void BuildOverlayFrame(std::uintptr_t exeBase,
 
     // 2d. Pass 3b: Floating 3D Monster Part Callouts (drawn with Depth OFF so Opaque .SBC terrain
     //     never clips z=0 badges, yet STILL before Pass 4 2D Player UI Restore so HUD/Panel stay on top!)
-    if (visEnabled && snap.hasCamera &&
+    if (visEnabled && snap.hasCamera && !showingHistFocal &&
         viewState.emPartMode != app::EmPartMode::Off &&
         viewState.emLabelMode != app::EmPartLabelMode::Off) {
         EmitMonsterPart3DLabels(outVerts, proj, csEnc, viewState, px, resScale, alphaMul);
@@ -6081,14 +6464,14 @@ void BuildOverlayFrame(std::uintptr_t exeBase,
     float leftBarBottom = y0;
 
     if (viewState.showOverlay && (visEnabled || anyFreeze || viewState.panelOpen || anySceneMod || showStartupToast)) {
-        char linePrefix[260]{};
+        char linePrefix[320]{};
         char freezeSeg[40]{};
         char tailSeg[16]{};
         char stateSeg[48]{};
 
         if (!visEnabled && !anyFreeze && !viewState.panelOpen && !anySceneMod && showStartupToast) {
             std::snprintf(linePrefix, sizeof(linePrefix),
-                          "MHW HFI READY  |  [U] VIS  [I] FREEZE  [K] WORLD  [J] KEEP  [O] +1F  [P] PANEL  [\\] HUD");
+                          "MHW HFI READY | [U] VIS [I] FRZ [K] WORLD [O/L] +-1F [;] STACK [P] PANEL");
         } else {
             char mapSeg[48]{};
             if ((viewState.visMask & (app::kCatEnvObject | app::kCatStageMesh)) != 0) {
@@ -6127,14 +6510,25 @@ void BuildOverlayFrame(std::uintptr_t exeBase,
                 std::snprintf(sceneSeg, sizeof(sceneSeg), "  |  HIDE:PL");
             }
 
+            char histSeg[48]{};
+            if (showingHistFocal && wantedStack > 0U) {
+                std::snprintf(histSeg, sizeof(histSeg), " HIST:T-%u/%u STACK:%uF",
+                              scrub, g_hist.count, wantedStack);
+            } else if (showingHistFocal) {
+                std::snprintf(histSeg, sizeof(histSeg), " HIST:T-%u/%u", scrub, g_hist.count);
+            } else if (wantedStack > 0U) {
+                std::snprintf(histSeg, sizeof(histSeg), " STACK:%uF", wantedStack);
+            }
+
             std::snprintf(linePrefix, sizeof(linePrefix),
-                          "VIS:%s [%s]  PL:%u/%u EM:%u/%u%s%s%s  |  ",
+                          "VIS:%s [%s]  PL:%u/%u EM:%u/%u%s%s%s%s  |  ",
                           visEnabled ? "ON" : "OFF",
                           app::MatchPresetName(viewState.visMask),
                           outStats.playerHurtbox, outStats.playerHitboxes,
                           outStats.monsterHurtbox, outStats.monsterHitbox,
                           partSeg,
                           mapSeg,
+                          histSeg,
                           sceneSeg);
 
             if (freezeMode == freeze::Mode::Full) {
@@ -6146,8 +6540,8 @@ void BuildOverlayFrame(std::uintptr_t exeBase,
             }
             std::snprintf(tailSeg, sizeof(tailSeg), "  [P]");
 
-            if (snap.mainPlDef.valid) {
-                std::snprintf(stateSeg, sizeof(stateSeg), "  |  FRAME:%s", snap.mainPlDef.badge);
+            if (activePlDef.valid) {
+                std::snprintf(stateSeg, sizeof(stateSeg), "  |  FRAME:%s", activePlDef.badge);
             }
         }
 
@@ -6194,8 +6588,8 @@ void BuildOverlayFrame(std::uintptr_t exeBase,
         }
         if (lenSt > 0) {
             float dummyHt = 0.0f;
-            Color4 badgeSrgb = PlayerDefSrgbColor(snap.mainPlDef.state, 0.98f, baseHalfThick, dummyHt);
-            if (snap.mainPlDef.state == PlayerDefState::Normal) {
+            Color4 badgeSrgb = PlayerDefSrgbColor(activePlDef.state, 0.98f, baseHalfThick, dummyHt);
+            if (activePlDef.state == PlayerDefState::Normal) {
                 badgeSrgb = {0.72f, 0.88f, 0.98f, 0.95f};
             }
             DrawText5x7(outVerts, proj, tx, y0 + padY, px, stateSeg, csEnc.encode(badgeSrgb));
@@ -6226,15 +6620,21 @@ void BuildOverlayFrame(std::uintptr_t exeBase,
         // Prominent Top-Center Freeze Pill + 4 Viewfinder Corner Brackets (unmistakable even when VIS:OFF!)
         if (anyFreeze) {
             const bool isFull = (freezeMode == freeze::Mode::Full);
-            const Color4 borderCol = csEnc.encode(isFull ? Color4{1.00f, 0.24f, 0.18f, 0.98f}
-                                                         : Color4{1.00f, 0.72f, 0.12f, 0.98f});
+            const Color4 borderCol = csEnc.encode(
+                showingHistFocal
+                    ? Color4{0.20f, 0.88f, 1.00f, 0.98f}
+                    : (isFull ? Color4{1.00f, 0.24f, 0.18f, 0.98f} : Color4{1.00f, 0.72f, 0.12f, 0.98f}));
             const Color4 bgCol     = csEnc.encode(isFull ? Color4{0.20f, 0.03f, 0.03f, 0.90f}
                                                          : Color4{0.20f, 0.12f, 0.02f, 0.90f});
-            const Color4 titleCol  = csEnc.encode(isFull ? Color4{1.00f, 0.95f, 0.95f, 1.00f}
-                                                         : Color4{1.00f, 0.93f, 0.58f, 1.00f});
+            const Color4 titleCol  = csEnc.encode(
+                showingHistFocal
+                    ? Color4{0.78f, 0.96f, 1.00f, 1.00f}
+                    : (isFull ? Color4{1.00f, 0.95f, 0.95f, 1.00f} : Color4{1.00f, 0.93f, 0.58f, 1.00f}));
             const Color4 subCol    = csEnc.encode({0.93f, 0.95f, 0.98f, 0.95f});
-            const Color4 brkCol    = csEnc.encode(isFull ? Color4{1.00f, 0.26f, 0.20f, 0.85f}
-                                                         : Color4{1.00f, 0.74f, 0.14f, 0.85f});
+            const Color4 brkCol    = csEnc.encode(
+                showingHistFocal
+                    ? Color4{0.20f, 0.88f, 1.00f, 0.88f}
+                    : (isFull ? Color4{1.00f, 0.26f, 0.20f, 0.85f} : Color4{1.00f, 0.74f, 0.14f, 0.85f}));
 
             // 4 sleek viewfinder corner brackets around the active display perimeter
             const float bm = 8.0f * resScale;
@@ -6254,19 +6654,35 @@ void BuildOverlayFrame(std::uintptr_t exeBase,
             proj.emitRect2D(outVerts, uiW - bm - bt, uiH - bm - bl, uiW - bm, uiH - bm - bt, brkCol);
 
             // Top-Center bold Freeze Banner Pill
-            const char* titleStr = isFull ? "FULL FREEZE" : "WORLD FREEZE";
-            char subBuf[64]{};
-            if (isFull) {
-                std::snprintf(subBuf, sizeof(subBuf), "[I] RESUME   [O] +1F");
+            const char* titleStr = showingHistFocal
+                                       ? (isFull ? "FULL FREEZE  [HISTORY]" : "WORLD FREEZE  [HISTORY]")
+                                       : (isFull ? "FULL FREEZE" : "WORLD FREEZE");
+            char stackTag[16]{};
+            if (wantedStack > 0U) {
+                std::snprintf(stackTag, sizeof(stackTag), "%uF", wantedStack);
+            } else {
+                std::snprintf(stackTag, sizeof(stackTag), "OFF");
+            }
+            char subBuf[112]{};
+            if (showingHistFocal) {
+                std::snprintf(subBuf, sizeof(subBuf),
+                              "T-%u / %u  |  [O] +1F  [L] -1F  [SHIFT+L] LIVE  [;] STACK:%s",
+                              scrub, g_hist.count, stackTag);
+            } else if (isFull) {
+                std::snprintf(subBuf, sizeof(subBuf),
+                              "[I] RESUME  [O] +1F  [L] -1F (%uF)  [;] STACK:%s",
+                              g_hist.count, stackTag);
             } else {
                 const bool keepOn = freeze::IsKeepHitboxesActive();
+                char burstTag[16]{};
                 if (freeze::IsWorldFreezeBurstEnabled()) {
-                    std::snprintf(subBuf, sizeof(subBuf), "[K] RESUME  [O] +1F  [J] KEEP:%s  BURST:%u",
-                                  keepOn ? "ON" : "OFF", freeze::BurstDeferredCount());
+                    std::snprintf(burstTag, sizeof(burstTag), "%u", freeze::BurstDeferredCount());
                 } else {
-                    std::snprintf(subBuf, sizeof(subBuf), "[K] RESUME  [O] +1F  [J] KEEP:%s  BURST:OFF",
-                                  keepOn ? "ON" : "OFF");
+                    std::snprintf(burstTag, sizeof(burstTag), "OFF");
                 }
+                std::snprintf(subBuf, sizeof(subBuf),
+                              "[K] RESUME  [O] +1F  [L] -1F  [J] KEEP:%s  BURST:%s  [;] %s",
+                              keepOn ? "ON" : "OFF", burstTag, stackTag);
             }
             const char* subStr = subBuf;
 

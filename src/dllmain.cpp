@@ -7,8 +7,11 @@
 //    I       : Instant zero-delay full game freeze / resume
 //    K       : Pause everything except the Player (World Freeze / Resume)
 //    J       : Toggle keeping single-trigger hitboxes active & repeatable while frozen
-//    O       : Advance +1 frame while frozen (works in both Full & World Freeze)
+//    O       : Advance +1 frame while frozen (steps scrubbed history forward first)
+//    L       : Step -1 frame in 3D hitbox history while frozen (Shift+L jumps to LIVE)
+//    ;       : Cycle Multi-Frame Onion-Skin Stack window (OFF / 3F .. 60F)
 //    P       : Open / close interactive Filter & Scene Panel (Shift+P quick-cycles preset)
+//    \       : Show / hide 2D HUD overlay for clean screenshots
 //
 //  Zero-Idle-Overhead Design:
 //    - 0 background threads after attach.
@@ -54,15 +57,18 @@ struct RawXInputState {
 };
 using XInputGetStateFn = DWORD(WINAPI*)(DWORD, RawXInputState*);
 
-enum KeyActionBit : std::uint8_t {
-    kKeyVis           = 0x01,
-    kKeyFreeze        = 0x02,
-    kKeyWorldFreeze   = 0x04,
-    kKeyKeepHitbox    = 0x08,
-    kKeyStep          = 0x10,
-    kKeyFilter        = 0x20,
-    kKeyQuickPreset   = 0x40,
-    kKeyToggleOverlay = 0x80
+enum KeyActionBit : std::uint16_t {
+    kKeyVis           = 0x0001u,
+    kKeyFreeze        = 0x0002u,
+    kKeyWorldFreeze   = 0x0004u,
+    kKeyKeepHitbox    = 0x0008u,
+    kKeyStep          = 0x0010u,
+    kKeyFilter        = 0x0020u,
+    kKeyQuickPreset   = 0x0040u,
+    kKeyToggleOverlay = 0x0080u,
+    kKeyStepBack      = 0x0100u,
+    kKeyJumpLive      = 0x0200u,
+    kKeyCycleStack    = 0x0400u
 };
 
 enum PresentWorkBit : std::uint8_t {
@@ -144,19 +150,19 @@ std::mutex                 g_liveRuntimeCfgMx;
 app::ChatCommandConfig     g_liveChatCfg{};
 std::atomic<bool>          g_gamepadPanelEnabled{true};
 
-std::uint8_t               g_vkToAction[256]{};
-int                        g_actionVks[7]{};
+std::uint16_t              g_vkToAction[256]{};
+int                        g_actionVks[9]{};
 std::atomic<std::uint8_t>  g_presentWorkMask{0};
-std::atomic<std::uint8_t>  g_edgeKeyMask{0};
+std::atomic<std::uint16_t> g_edgeKeyMask{0};
 std::atomic<bool>          g_pendingBurstToggle{false};
-std::atomic<std::uint8_t>  g_heldKeyMask{0};
+std::atomic<std::uint16_t> g_heldKeyMask{0};
 std::atomic<bool>          g_panelOpenAtomic{false};
 std::atomic<std::uint32_t> g_panelCmdMask{0};
 std::atomic<std::uint8_t>  g_suppressedCamVkMask{0};
 
 void BuildHotkeyTable() noexcept {
     std::memset(g_vkToAction, 0, sizeof(g_vkToAction));
-    auto bind = [](int idx, int vk, std::uint8_t bit) {
+    auto bind = [](int idx, int vk, std::uint16_t bit) {
         g_actionVks[idx] = vk;
         if (vk > 0 && vk < 256) {
             g_vkToAction[vk] |= bit;
@@ -169,6 +175,8 @@ void BuildHotkeyTable() noexcept {
     bind(4, g_cfg.vkStepFrame,     kKeyStep);
     bind(5, g_cfg.vkCycleFilter,   kKeyFilter);
     bind(6, g_cfg.vkToggleOverlay, kKeyToggleOverlay);
+    bind(7, g_cfg.vkStepBack,      kKeyStepBack);
+    bind(8, g_cfg.vkHistStack,     kKeyCycleStack);
 }
 
 std::uint32_t MapVkToPanelCmd(WPARAM vk) noexcept {
@@ -260,7 +268,8 @@ void __fastcall Hook_KeyboardUpdateState(std::uintptr_t kb, std::uint32_t* keyBi
         clearVk('O');
         clearVk('K');
         clearVk('L');
-        clearVk(VK_OEM_1); // ';'
+        clearVk(VK_OEM_1);    // 0xBA: ';' on GetAsyncKeyState fallback / JIS DIK_COLON (0x92)
+        clearVk(VK_OEM_PLUS); // 0xBB: physical ';' (DIK_SEMICOLON = 0x27) in MHW's JIS DirectInput table (0x143511E20)
     }
 
     if (panelOpen) {
@@ -338,7 +347,7 @@ void RefreshHotRuntimeConfig() {
     }
 }
 
-bool MatchChatCommandHot(const char* msg, std::uint8_t& outActionBit, const char*& outActionName) {
+bool MatchChatCommandHot(const char* msg, std::uint16_t& outActionBit, const char*& outActionName) {
     std::lock_guard<std::mutex> lk(g_liveRuntimeCfgMx);
     bool padEn = g_gamepadPanelEnabled.load(std::memory_order_relaxed);
     if (app::HotReloadRuntimeConfig(g_liveChatCfg, padEn)) {
@@ -365,6 +374,16 @@ bool MatchChatCommandHot(const char* msg, std::uint8_t& outActionBit, const char
     if (ExactChatStringEquals(msg, g_liveChatCfg.cmdStep, cs)) {
         outActionBit  = kKeyStep;
         outActionName = "O (StepFrame)";
+        return true;
+    }
+    if (ExactChatStringEquals(msg, g_liveChatCfg.cmdStepBack, cs)) {
+        outActionBit  = kKeyStepBack;
+        outActionName = "L (StepBack)";
+        return true;
+    }
+    if (ExactChatStringEquals(msg, g_liveChatCfg.cmdHistStack, cs)) {
+        outActionBit  = kKeyCycleStack;
+        outActionName = "; (HistStack)";
         return true;
     }
     if (ExactChatStringEquals(msg, g_liveChatCfg.cmdKeepHitbox, cs)) {
@@ -406,7 +425,7 @@ void __fastcall Hook_ChatDispatch(std::uintptr_t sChat,
     }
 
     if (hasLocalText) {
-        std::uint8_t actionBit = 0;
+        std::uint16_t actionBit = 0;
         const char* actionName = "";
         if (MatchChatCommandHot(msgBuf, actionBit, actionName)) {
             g_edgeKeyMask.fetch_or(actionBit, std::memory_order_release);
@@ -576,10 +595,10 @@ LRESULT CALLBACK GameKeyboardHookProc(int code, WPARAM wParam, LPARAM lParam) {
         const bool ctrlHeld = ((::GetKeyState(VK_CONTROL) & 0x8000) != 0);
         const std::uint8_t camBit = BlockedCameraBit(wParam);
 
-        const std::uint8_t bit = g_vkToAction[wParam];
+        const std::uint16_t bit = g_vkToAction[wParam];
         if (bit != 0) {
             if (isUp) {
-                g_heldKeyMask.fetch_and(static_cast<std::uint8_t>(~bit), std::memory_order_relaxed);
+                g_heldKeyMask.fetch_and(static_cast<std::uint16_t>(~bit), std::memory_order_relaxed);
                 const bool wasSuppressedCam =
                     (camBit != 0) &&
                     ((g_suppressedCamVkMask.fetch_and(static_cast<std::uint8_t>(~camBit), std::memory_order_relaxed) & camBit) != 0);
@@ -588,12 +607,15 @@ LRESULT CALLBACK GameKeyboardHookProc(int code, WPARAM wParam, LPARAM lParam) {
                     return 1;
                 }
             } else if (!altHeld && !ctrlHeld) {
-                std::uint8_t emitBit = bit;
+                std::uint16_t emitBit = bit;
                 if (bit == kKeyFilter && (::GetKeyState(VK_SHIFT) & 0x8000) != 0) {
                     emitBit = kKeyQuickPreset;
+                } else if (bit == kKeyStepBack && (::GetKeyState(VK_SHIFT) & 0x8000) != 0) {
+                    emitBit = kKeyJumpLive;
                 }
                 g_heldKeyMask.fetch_or(bit, std::memory_order_relaxed);
-                if (!wasDown) {
+                const bool allowKeyRepeat = (emitBit == kKeyStepBack);
+                if (!wasDown || allowKeyRepeat) {
                     g_edgeKeyMask.fetch_or(emitBit, std::memory_order_release);
                 }
                 g_presentWorkMask.fetch_or(kWorkHotkeyGuard, std::memory_order_release);
@@ -645,21 +667,25 @@ void PollFallbackIfHookUnavailable(HWND gameHwnd) noexcept {
         ((::GetAsyncKeyState(VK_MENU) & 0x8000) != 0)) {
         return;
     }
-    const std::uint8_t prevHeld = g_heldKeyMask.load(std::memory_order_relaxed);
-    std::uint8_t nowHeld = 0;
-    static constexpr std::uint8_t kBits[7] = {
-        kKeyVis, kKeyFreeze, kKeyWorldFreeze, kKeyKeepHitbox, kKeyStep, kKeyFilter, kKeyToggleOverlay
+    const std::uint16_t prevHeld = g_heldKeyMask.load(std::memory_order_relaxed);
+    std::uint16_t nowHeld = 0;
+    static constexpr std::uint16_t kBits[9] = {
+        kKeyVis, kKeyFreeze, kKeyWorldFreeze, kKeyKeepHitbox, kKeyStep, kKeyFilter, kKeyToggleOverlay,
+        kKeyStepBack, kKeyCycleStack
     };
-    for (int i = 0; i < 7; ++i) {
+    for (int i = 0; i < 9; ++i) {
         const int vk = g_actionVks[i];
         if (vk > 0 && vk < 256 && (::GetAsyncKeyState(vk) & 0x8000) != 0) {
             nowHeld |= kBits[i];
         }
     }
     g_heldKeyMask.store(nowHeld, std::memory_order_relaxed);
-    std::uint8_t rising = static_cast<std::uint8_t>(nowHeld & ~prevHeld);
+    std::uint16_t rising = static_cast<std::uint16_t>(nowHeld & ~prevHeld);
     if ((rising & kKeyFilter) != 0 && (::GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0) {
-        rising = static_cast<std::uint8_t>((rising & ~kKeyFilter) | kKeyQuickPreset);
+        rising = static_cast<std::uint16_t>((rising & ~kKeyFilter) | kKeyQuickPreset);
+    }
+    if ((rising & kKeyStepBack) != 0 && (::GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0) {
+        rising = static_cast<std::uint16_t>((rising & ~kKeyStepBack) | kKeyJumpLive);
     }
     if (rising != 0) {
         g_edgeKeyMask.fetch_or(rising, std::memory_order_release);
@@ -837,8 +863,8 @@ void ApplyPanelCommands(std::uint32_t cmds) noexcept {
             }
         }
     } else {
-        // Page 0: Main Filter & Scene Panel (19 rows: 0..18)
-        constexpr int kMainPanelRows = 19;
+        // Page 0: Main Filter & Scene Panel (23 rows: 0..22)
+        constexpr int kMainPanelRows = 23;
         if ((cmds & kPanelUp) != 0) {
             g_viewState.panelCursor = (g_viewState.panelCursor + kMainPanelRows - 1) % kMainPanelRows;
         }
@@ -967,6 +993,50 @@ void ApplyPanelCommands(std::uint32_t cmds) noexcept {
                 }
             } else if (row == 18) {
                 freeze::ToggleWorldFreezeBurst();
+            } else if (row == 19) {
+                const int cnt  = static_cast<int>(app::HistRecordMode::Count);
+                const int cur  = static_cast<int>(g_viewState.histRecMode);
+                const int next = (dir < 0) ? ((cur + cnt - 1) % cnt) : ((cur + 1) % cnt);
+                g_viewState.histRecMode = static_cast<app::HistRecordMode>(next);
+                if (g_viewState.histRecMode == app::HistRecordMode::Off) {
+                    coll::ResetHistory();
+                } else {
+                    EnsureVisEnabled();
+                }
+            } else if (row == 20) {
+                if (dir == 0) {
+                    coll::HistJumpLive();
+                } else if (freeze::CurrentMode() != freeze::Mode::None) {
+                    if (dir < 0) {
+                        if (coll::HistStepBack(1U)) EnsureVisEnabled();
+                    } else {
+                        if (coll::HistScrubOffset() > 0U) {
+                            coll::HistStepForward(1U);
+                            EnsureVisEnabled();
+                        } else {
+                            freeze::StepOneFrame(g_exeBase);
+                        }
+                    }
+                }
+            } else if (row == 21) {
+                if (dir == 0) {
+                    g_viewState.histStackIdx = (g_viewState.histStackIdx + 1) % app::kHistStackCount;
+                } else if (dir < 0) {
+                    if (g_viewState.histStackIdx > 0) --g_viewState.histStackIdx;
+                } else {
+                    if (g_viewState.histStackIdx + 1 < app::kHistStackCount) ++g_viewState.histStackIdx;
+                }
+                if (g_viewState.histStackIdx > 0) {
+                    if (g_viewState.histRecMode == app::HistRecordMode::Off) {
+                        g_viewState.histRecMode = app::HistRecordMode::LiveAndSteps;
+                    }
+                    EnsureVisEnabled();
+                }
+            } else if (row == 22) {
+                const int cnt  = static_cast<int>(app::HistStackScope::Count);
+                const int cur  = static_cast<int>(g_viewState.histStackScope);
+                const int next = (dir < 0) ? ((cur + cnt - 1) % cnt) : ((cur + 1) % cnt);
+                g_viewState.histStackScope = static_cast<app::HistStackScope>(next);
             }
         };
 
@@ -997,8 +1067,11 @@ void ApplyPanelCommands(std::uint32_t cmds) noexcept {
         g_viewState.emUnsStyle != prev.emUnsStyle ||
         g_viewState.emLabelMode != prev.emLabelMode ||
         g_viewState.emTargetScope != prev.emTargetScope ||
-        g_viewState.emPartMask != prev.emPartMask) {
-        app::Log("panel: page=%d mask=0x%02X(%s) line=(em=%.2fx,sbc=%.2fx) emPart=%s(mask=0x%08X,uns=%s,lbl=%s,tgt=%d) sbc=%s(%dm,tier=%s,spec=%s,style=%s) hideEm=%d stageHide=%s backdrop=%s",
+        g_viewState.emPartMask != prev.emPartMask ||
+        g_viewState.histRecMode != prev.histRecMode ||
+        g_viewState.histStackIdx != prev.histStackIdx ||
+        g_viewState.histStackScope != prev.histStackScope) {
+        app::Log("panel: page=%d mask=0x%02X(%s) line=(em=%.2fx,sbc=%.2fx) emPart=%s(mask=0x%08X,uns=%s,lbl=%s,tgt=%d) sbc=%s(%dm,tier=%s,spec=%s,style=%s) hideEm=%d stageHide=%s backdrop=%s hist=(rec=%s,stack=%dF,scope=%s)",
                  g_viewState.panelPage,
                  g_viewState.visMask,
                  app::MatchPresetName(g_viewState.visMask),
@@ -1016,7 +1089,10 @@ void ApplyPanelCommands(std::uint32_t cmds) noexcept {
                  app::DepthGuideModeName(g_viewState.depthMode),
                  g_viewState.hideMonster ? 1 : 0,
                  app::StageHideModeName(g_viewState.stageHide),
-                 app::BackdropModeName(g_viewState.backdrop));
+                 app::BackdropModeName(g_viewState.backdrop),
+                 app::HistRecordModeName(g_viewState.histRecMode),
+                 app::HistStackFramesFromIdx(g_viewState.histStackIdx),
+                 app::HistStackScopeName(g_viewState.histStackScope));
     }
 }
 
@@ -1070,19 +1146,20 @@ __declspec(noinline) void ProcessPresentWork(std::uintptr_t d3dRender) {
         g_xinputFallbackNav.Reset();
     }
 
-    const std::uint8_t edges     = g_edgeKeyMask.exchange(0, std::memory_order_acq_rel);
-    const std::uint32_t panelCmd = g_panelCmdMask.exchange(0, std::memory_order_acq_rel);
-    std::uint8_t held            = g_heldKeyMask.load(std::memory_order_relaxed);
+    const std::uint16_t edges     = g_edgeKeyMask.exchange(0, std::memory_order_acq_rel);
+    const std::uint32_t panelCmd  = g_panelCmdMask.exchange(0, std::memory_order_acq_rel);
+    std::uint16_t held            = g_heldKeyMask.load(std::memory_order_relaxed);
 
     // Clear any stale held-bit if user Alt-Tabbed while holding a hotkey
     if (held != 0) {
         if (++g_heldWatchdog >= 16) {
             g_heldWatchdog = 0;
-            std::uint8_t verified = 0;
-            static constexpr std::uint8_t kBits[7] = {
-                kKeyVis, kKeyFreeze, kKeyWorldFreeze, kKeyKeepHitbox, kKeyStep, kKeyFilter, kKeyToggleOverlay
+            std::uint16_t verified = 0;
+            static constexpr std::uint16_t kBits[9] = {
+                kKeyVis, kKeyFreeze, kKeyWorldFreeze, kKeyKeepHitbox, kKeyStep, kKeyFilter, kKeyToggleOverlay,
+                kKeyStepBack, kKeyCycleStack
             };
-            for (int i = 0; i < 7; ++i) {
+            for (int i = 0; i < 9; ++i) {
                 const int vk = g_actionVks[i];
                 if ((held & kBits[i]) != 0 && vk > 0 && vk < 256 && (::GetAsyncKeyState(vk) & 0x8000) != 0) {
                     verified |= kBits[i];
@@ -1095,7 +1172,7 @@ __declspec(noinline) void ProcessPresentWork(std::uintptr_t d3dRender) {
         g_heldWatchdog = 0;
     }
 
-    static constexpr std::uint8_t kFreezeCamKeyMask =
+    static constexpr std::uint16_t kFreezeCamKeyMask =
         kKeyFreeze | kKeyWorldFreeze | kKeyKeepHitbox | kKeyStep;
 
     if (edges != 0 || panelCmd != 0 || g_pendingBurstToggle.load(std::memory_order_relaxed)) {
@@ -1113,7 +1190,12 @@ __declspec(noinline) void ProcessPresentWork(std::uintptr_t d3dRender) {
             const bool wasVis = ((g_presentWorkMask.load(std::memory_order_relaxed) & kWorkVisEnabled) != 0);
             const bool nextVis = !wasVis;
             if (nextVis) g_presentWorkMask.fetch_or(kWorkVisEnabled, std::memory_order_release);
-            else         g_presentWorkMask.fetch_and(static_cast<std::uint8_t>(~kWorkVisEnabled), std::memory_order_release);
+            else {
+                g_presentWorkMask.fetch_and(static_cast<std::uint8_t>(~kWorkVisEnabled), std::memory_order_release);
+                if (freeze::CurrentMode() == freeze::Mode::None) {
+                    coll::ResetHistory();
+                }
+            }
             app::Log("hotkey: Visualization %s (preset=%s, mask=0x%02X)",
                      nextVis ? "ON" : "OFF",
                      app::MatchPresetName(g_viewState.visMask),
@@ -1134,8 +1216,41 @@ __declspec(noinline) void ProcessPresentWork(std::uintptr_t d3dRender) {
 
         if ((edges & kKeyStep) != 0) {
             if (freeze::CurrentMode() != freeze::Mode::None) {
-                freeze::StepOneFrame(g_exeBase);
+                if (coll::HistScrubOffset() > 0U) {
+                    coll::HistStepForward(1U);
+                    EnsureVisEnabled();
+                } else {
+                    freeze::StepOneFrame(g_exeBase);
+                }
             }
+        }
+
+        if ((edges & kKeyStepBack) != 0) {
+            if (freeze::CurrentMode() != freeze::Mode::None) {
+                if (coll::HistStepBack(1U)) {
+                    EnsureVisEnabled();
+                }
+            }
+        }
+
+        if ((edges & kKeyJumpLive) != 0) {
+            if (coll::HistScrubOffset() > 0U) {
+                coll::HistJumpLive();
+                app::Log("hotkey: History Scrub -> LIVE");
+            }
+        }
+
+        if ((edges & kKeyCycleStack) != 0) {
+            g_viewState.histStackIdx = (g_viewState.histStackIdx + 1) % app::kHistStackCount;
+            if (g_viewState.histStackIdx > 0) {
+                if (g_viewState.histRecMode == app::HistRecordMode::Off) {
+                    g_viewState.histRecMode = app::HistRecordMode::LiveAndSteps;
+                }
+                EnsureVisEnabled();
+            }
+            app::Log("hotkey: Multi-Frame Stack -> %dF (scope=%s)",
+                     app::HistStackFramesFromIdx(g_viewState.histStackIdx),
+                     app::HistStackScopeName(g_viewState.histStackScope));
         }
 
         if ((edges & kKeyFilter) != 0) {
@@ -1427,9 +1542,12 @@ bool TryInstallHooks(HMODULE exe) {
     g_viewState.depthMode    = g_cfg.startDepthMode;
     g_viewState.sbcTier      = g_cfg.startSbcTier;
     g_viewState.specialSbc   = g_cfg.startSpecialSbc;
-    g_viewState.emPartMode   = g_cfg.startEmPartMode;
-    g_viewState.emUnsStyle   = g_cfg.startEmUnsStyle;
-    g_viewState.emLabelMode  = g_cfg.startEmLabelMode;
+    g_viewState.emPartMode     = g_cfg.startEmPartMode;
+    g_viewState.emUnsStyle     = g_cfg.startEmUnsStyle;
+    g_viewState.emLabelMode    = g_cfg.startEmLabelMode;
+    g_viewState.histRecMode    = g_cfg.startHistRecMode;
+    g_viewState.histStackIdx   = g_cfg.startHistStackIdx;
+    g_viewState.histStackScope = g_cfg.startHistStackScope;
 
     std::uint8_t initialWork = kWorkInitKbHook;
     if (g_cfg.showHudBanner) initialWork |= kWorkStartupToast;
@@ -1475,7 +1593,7 @@ DWORD WINAPI InitWorker(LPVOID) {
 
     for (int attempt = 0; attempt < 2400; ++attempt) {
         if (TryInstallHooks(exe)) {
-            app::Log("init: ready! U=Toggle Vis, I=Full Freeze, K=World Freeze, J=Keep Hitboxes, O=Step, P=Filter & Scene Panel (0 background threads)");
+            app::Log("init: ready! U=Toggle Vis, I=Full Freeze, K=World Freeze, J=Keep Hitboxes, O=+1F, L=-1F(History), ;=Stack, P=Filter & Scene Panel (0 background threads)");
             return 0;
         }
         ::Sleep(50);
@@ -1505,6 +1623,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved) {
             freeze::SetFrozen(g_exeBase, false);
         }
         hook::RemoveAllHooks();
+        coll::ResetHistory();
         render::Shutdown();
         app::CloseLog();
     }

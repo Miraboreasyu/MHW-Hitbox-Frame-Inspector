@@ -42,6 +42,14 @@ struct EmInspectorCounts {
 
 EmInspectorCounts GetLastEmInspectorCounts() noexcept;
 
+// 3D Hitbox Frame History (Ring Buffer for -1F/+1F scrubbing & Multi-Frame Onion-Skin stacking)
+std::uint32_t HistFrameCount() noexcept;
+std::uint32_t HistScrubOffset() noexcept;
+bool HistStepBack(std::uint32_t delta = 1U) noexcept;
+bool HistStepForward(std::uint32_t delta = 1U) noexcept;
+void HistJumpLive() noexcept;
+void ResetHistory() noexcept;
+
 // Builds optional fullscreen collision backdrop + 3D wireframe quads + 2D HUD & [P] Filter Panel.
 void BuildOverlayFrame(std::uintptr_t exeBase,
                        float screenW,

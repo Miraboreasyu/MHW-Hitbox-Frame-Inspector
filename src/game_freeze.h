@@ -39,6 +39,9 @@ bool StepOneFrame(std::uintptr_t exeBase);
 // Returns true if per-frame camera/freeze maintenance still needs Present ticks.
 bool SyncActiveFrame(std::uintptr_t exeBase, bool anyModKeyHeld);
 
+std::uint32_t FullStepEpoch() noexcept;
+std::uint32_t WorldStepEpoch() noexcept;
+
 bool IsFrozen();
 bool IsWorldFrozen();
 Mode CurrentMode();

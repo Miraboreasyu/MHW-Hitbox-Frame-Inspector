@@ -121,6 +121,16 @@ bool TryApplyChatOrPadKey(const std::string& key,
         chat.cmdFreezeBurst = ParseChatCmdValue(rawValTrimmed);
         return true;
     }
+    if (key == "CHATCMDSTEPBACK" || key == "CHAT_CMD_STEP_BACK" || key == "CHATSTEPBACK" ||
+        key == "CHAT_L" || key == "CHATL") {
+        chat.cmdStepBack = ParseChatCmdValue(rawValTrimmed);
+        return true;
+    }
+    if (key == "CHATCMDHISTSTACK" || key == "CHAT_CMD_HIST_STACK" || key == "CHATHISTSTACK" ||
+        key == "CHATCMDSTACK" || key == "CHATSTACK" || key == "CHATCMDTRAIL") {
+        chat.cmdHistStack = ParseChatCmdValue(rawValTrimmed);
+        return true;
+    }
     if (key == "GAMEPADPANEL" || key == "GAMEPAD_PANEL" || key == "CONTROLLERPANEL") {
         gamepadPanel = std::atoi(strippedVal.c_str()) != 0;
         return true;
@@ -338,6 +348,10 @@ Config LoadConfig() {
         else if (key == "KEYPERSISTHITBOX" || key == "KEYKEEPHITBOX" || key == "KEY_KEEP" || key == "KEY_PERSIST")
             cfg.vkPersistHitbox = ParseVirtualKey(val, cfg.vkPersistHitbox);
         else if (key == "KEYSTEPFRAME" || key == "KEY_STEP") cfg.vkStepFrame = ParseVirtualKey(val, cfg.vkStepFrame);
+        else if (key == "KEYSTEPBACK" || key == "KEY_STEP_BACK" || key == "KEYBACKFRAME")
+            cfg.vkStepBack = ParseVirtualKey(val, cfg.vkStepBack);
+        else if (key == "KEYHISTSTACK" || key == "KEY_HIST_STACK" || key == "KEYSTACK" || key == "KEYTRAIL")
+            cfg.vkHistStack = ParseVirtualKey(val, cfg.vkHistStack);
         else if (key == "KEYCYCLEFILTER" || key == "KEY_FILTER") cfg.vkCycleFilter = ParseVirtualKey(val, cfg.vkCycleFilter);
         else if (key == "KEYTOGGLEOVERLAY" || key == "KEY_OVERLAY" || key == "KEYOVERLAY" || key == "KEYSHOWOVERLAY" || key == "KEYTOGGLEHUD")
             cfg.vkToggleOverlay = ParseVirtualKey(val, cfg.vkToggleOverlay);
@@ -425,16 +439,32 @@ Config LoadConfig() {
             if (sc >= 0.25f && sc <= 4.0f) {
                 cfg.defaultSbcLineIdx = NearestLineScaleIdx(sc);
             }
+        } else if (key == "HISTORYRECORDMODE" || key == "HISTRECORDMODE" || key == "HISTORY_RECORD_MODE") {
+            int rm = std::atoi(val.c_str());
+            if (rm >= 0 && rm < static_cast<int>(HistRecordMode::Count)) {
+                cfg.startHistRecMode = static_cast<HistRecordMode>(rm);
+            }
+        } else if (key == "HISTORYSTACKFRAMES" || key == "HISTSTACKFRAMES" || key == "HISTORY_STACK_FRAMES" ||
+                   key == "STACKFRAMES") {
+            cfg.startHistStackIdx = NearestHistStackIdx(std::atoi(val.c_str()));
+        } else if (key == "HISTORYSTACKSCOPE" || key == "HISTSTACKSCOPE" || key == "HISTORY_STACK_SCOPE" ||
+                   key == "STACKSCOPE") {
+            int ss = std::atoi(val.c_str());
+            if (ss >= 0 && ss < static_cast<int>(HistStackScope::Count)) {
+                cfg.startHistStackScope = static_cast<HistStackScope>(ss);
+            }
         }
     }
 
-    Log("config: loaded mhw_hfi.ini (enabled=%d, vkVis=0x%02X, vkFreeze=0x%02X, vkWorld=0x%02X, vkKeep=0x%02X, vkStep=0x%02X, vkPanel=0x%02X, vkOverlay=0x%02X, mask=0x%02X, burst=%d; chat en=%d cs=%d U=\"%s\" I=\"%s\" K=\"%s\" O=\"%s\" J=\"%s\" P=\"%s\" \\=\"%s\" burstCmd=\"%s\" pad=%d)",
+    Log("config: loaded mhw_hfi.ini (enabled=%d, vkVis=0x%02X, vkFreeze=0x%02X, vkWorld=0x%02X, vkKeep=0x%02X, vkStep=0x%02X, vkBack=0x%02X, vkStack=0x%02X, vkPanel=0x%02X, vkOverlay=0x%02X, mask=0x%02X, burst=%d, histRec=%d, histStack=%dF, histScope=%d; chat en=%d cs=%d U=\"%s\" I=\"%s\" K=\"%s\" O=\"%s\" L=\"%s\" ;=\"%s\" J=\"%s\" P=\"%s\" \\=\"%s\" burstCmd=\"%s\" pad=%d)",
         cfg.enabled ? 1 : 0, cfg.vkToggleVis, cfg.vkToggleFreeze, cfg.vkFreezeOthers,
-        cfg.vkPersistHitbox, cfg.vkStepFrame, cfg.vkCycleFilter, cfg.vkToggleOverlay, cfg.defaultVisMask,
+        cfg.vkPersistHitbox, cfg.vkStepFrame, cfg.vkStepBack, cfg.vkHistStack, cfg.vkCycleFilter, cfg.vkToggleOverlay, cfg.defaultVisMask,
         cfg.worldFreezeDelayedBurst ? 1 : 0,
+        static_cast<int>(cfg.startHistRecMode), HistStackFramesFromIdx(cfg.startHistStackIdx), static_cast<int>(cfg.startHistStackScope),
         cfg.chat.enabled ? 1 : 0, cfg.chat.caseSensitive ? 1 : 0,
         cfg.chat.cmdVis.c_str(), cfg.chat.cmdFreeze.c_str(), cfg.chat.cmdWorldFreeze.c_str(),
-        cfg.chat.cmdStep.c_str(), cfg.chat.cmdKeepHitbox.c_str(), cfg.chat.cmdPanel.c_str(),
+        cfg.chat.cmdStep.c_str(), cfg.chat.cmdStepBack.c_str(), cfg.chat.cmdHistStack.c_str(),
+        cfg.chat.cmdKeepHitbox.c_str(), cfg.chat.cmdPanel.c_str(),
         cfg.chat.cmdOverlay.c_str(), cfg.chat.cmdFreezeBurst.c_str(), cfg.gamepadPanel ? 1 : 0);
     return cfg;
 }
@@ -489,11 +519,12 @@ bool HotReloadRuntimeConfig(ChatCommandConfig& ioChat, bool& ioGamepadPanel) {
     ioChat         = nextChat;
     ioGamepadPanel = nextGamepad;
 
-    Log("config: hot-reloaded mhw_hfi.ini (%s; chat en=%d cs=%d U=\"%s\" I=\"%s\" K=\"%s\" O=\"%s\" J=\"%s\" P=\"%s\" \\=\"%s\" burstCmd=\"%s\" pad=%d)",
+    Log("config: hot-reloaded mhw_hfi.ini (%s; chat en=%d cs=%d U=\"%s\" I=\"%s\" K=\"%s\" O=\"%s\" L=\"%s\" ;=\"%s\" J=\"%s\" P=\"%s\" \\=\"%s\" burstCmd=\"%s\" pad=%d)",
         curStamp.exists ? "updated" : "removed -> defaults",
         nextChat.enabled ? 1 : 0, nextChat.caseSensitive ? 1 : 0,
         nextChat.cmdVis.c_str(), nextChat.cmdFreeze.c_str(), nextChat.cmdWorldFreeze.c_str(),
-        nextChat.cmdStep.c_str(), nextChat.cmdKeepHitbox.c_str(), nextChat.cmdPanel.c_str(),
+        nextChat.cmdStep.c_str(), nextChat.cmdStepBack.c_str(), nextChat.cmdHistStack.c_str(),
+        nextChat.cmdKeepHitbox.c_str(), nextChat.cmdPanel.c_str(),
         nextChat.cmdOverlay.c_str(), nextChat.cmdFreezeBurst.c_str(), nextGamepad ? 1 : 0);
     return true;
 }
@@ -610,6 +641,25 @@ const char* EmPartLabelModeName(EmPartLabelMode l) noexcept {
         case EmPartLabelMode::IdOnly:   return "ID + EXTRACT";
         case EmPartLabelMode::Off:      return "OFF";
         default:                        return "PHYS + ELEM + EXT";
+    }
+}
+
+const char* HistRecordModeName(HistRecordMode m) noexcept {
+    switch (m) {
+        case HistRecordMode::Off:           return "OFF";
+        case HistRecordMode::LiveAndSteps:  return "LIVE + STEPS";
+        case HistRecordMode::AllInclWfMove: return "ALL (+WF MOVE)";
+        default:                            return "LIVE + STEPS";
+    }
+}
+
+const char* HistStackScopeName(HistStackScope s) noexcept {
+    switch (s) {
+        case HistStackScope::HitboxOnly:   return "ATK HITBOX";
+        case HistStackScope::AtkAndPlHurt: return "ATK + PL HURT";
+        case HistStackScope::HurtboxOnly:  return "HURTBOXES";
+        case HistStackScope::AllEntities:  return "ALL ENTITIES";
+        default:                           return "ATK HITBOX";
     }
 }
 

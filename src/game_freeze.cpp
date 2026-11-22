@@ -36,6 +36,8 @@ std::atomic<std::uint8_t> g_unitMoveHookFlags{0};
 std::atomic<int>  g_worldStepReq{0};
 std::atomic<bool> g_worldStepActive{false};
 std::atomic<std::uint32_t> g_worldSettledTicks{0};
+std::atomic<std::uint32_t> g_fullStepEpoch{0};
+std::atomic<std::uint32_t> g_worldStepEpoch{0};
 int g_suppressKbFramesLeft = 0;
 std::atomic<std::uintptr_t> g_cachedMainPlayer{0};
 std::atomic<std::uintptr_t> g_cachedActiveCam{0};
@@ -986,6 +988,7 @@ void __fastcall Hook_UnitGenericMove(std::uintptr_t unit) {
         }
         if (activeCam != 0 && unit == activeCam) {
             if (g_stepCameraGuard.exchange(false, std::memory_order_acq_rel)) {
+                g_fullStepEpoch.fetch_add(1U, std::memory_order_release);
                 RefreshUnitMoveFlags();
                 RunGuardedCameraStepMove(exeBase, unit);
                 return;
@@ -1013,6 +1016,7 @@ void __fastcall Hook_UnitGenericMove(std::uintptr_t unit) {
         if (anchorUnit != 0 && unit == anchorUnit) {
             if (g_worldStepActive.load(std::memory_order_relaxed)) {
                 g_worldStepActive.store(false, std::memory_order_release);
+                g_worldStepEpoch.fetch_add(1U, std::memory_order_release);
             } else if (g_worldStepReq.exchange(0, std::memory_order_acq_rel) != 0) {
                 ClearPinnedNodesTable();
                 g_worldStepActive.store(true, std::memory_order_release);
@@ -1222,6 +1226,14 @@ bool SyncActiveFrame(std::uintptr_t exeBase, bool anyModKeyHeld) {
 
 bool IsFrozen() {
     return g_frozen.load(std::memory_order_relaxed);
+}
+
+std::uint32_t FullStepEpoch() noexcept {
+    return g_fullStepEpoch.load(std::memory_order_acquire);
+}
+
+std::uint32_t WorldStepEpoch() noexcept {
+    return g_worldStepEpoch.load(std::memory_order_acquire);
 }
 
 bool IsWorldFrozen() {

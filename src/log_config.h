@@ -97,10 +97,45 @@ enum class EmPartLabelMode : std::uint8_t {
     Count    = 4
 };
 
+enum class HistRecordMode : std::uint8_t {
+    Off           = 0, // Zero history recording / zero overhead
+    LiveAndSteps  = 1, // Default: records Live ticks + Full Freeze [O] steps + World Freeze [O] steps (walking in WF won't overwrite monster steps)
+    AllInclWfMove = 2, // Also records every frame in World Freeze as Player moves (for player roll/foresight trails)
+    Count         = 3
+};
+
+enum class HistStackScope : std::uint8_t {
+    HitboxOnly   = 0, // Default: aged trail frames draw Attack Hitboxes only (Em/Pl/Otomo/Env)
+    AtkAndPlHurt = 1, // Aged trail frames draw Attack Hitboxes + Player Hurtbox (with i-frame/GP colors)
+    HurtboxOnly  = 2, // Aged trail frames draw Hurtboxes (Em/Pl/Otomo/Env)
+    AllEntities  = 3, // Aged trail frames draw all categories enabled in visMask
+    Count        = 4
+};
+
+inline constexpr int kHistStackCount      = 8;
 inline constexpr int kMaxEmParts          = 32;
 inline constexpr int kSbcRadiusCount      = 4;
 inline constexpr int kLineScaleCount      = 8;
 inline constexpr int kDefaultLineScaleIdx = 3; // 1.00x
+
+inline int HistStackFramesFromIdx(int idx) noexcept {
+    static constexpr int kFrames[kHistStackCount] = {0, 3, 5, 10, 15, 20, 30, 60};
+    if (idx < 0) return kFrames[0];
+    if (idx >= kHistStackCount) return kFrames[kHistStackCount - 1];
+    return kFrames[idx];
+}
+
+inline int NearestHistStackIdx(int frames) noexcept {
+    static constexpr int kFrames[kHistStackCount] = {0, 3, 5, 10, 15, 20, 30, 60};
+    if (frames <= 0) return 0;
+    int bestIdx = 1;
+    int bestDiff = 1000000;
+    for (int i = 1; i < kHistStackCount; ++i) {
+        const int d = (frames > kFrames[i]) ? (frames - kFrames[i]) : (kFrames[i] - frames);
+        if (d < bestDiff) { bestDiff = d; bestIdx = i; }
+    }
+    return bestIdx;
+}
 
 inline float SbcRadiusMetersFromIdx(int idx) noexcept {
     static constexpr float kRadii[kSbcRadiusCount] = {15.0f, 25.0f, 45.0f, 80.0f};
@@ -150,11 +185,14 @@ struct ViewFilterState {
     EmPartLabelMode   emLabelMode     = EmPartLabelMode::Full;
     int               emTargetScope   = 0; // 0=Auto(Solo), 1=Auto(+Others), 2..9=Lock #1..#8(Solo)
     std::uint32_t     emPartMask      = 0xFFFFFFFFu;
+    HistRecordMode    histRecMode     = HistRecordMode::LiveAndSteps;
+    int               histStackIdx    = 0; // 0 = OFF, 1..7 = 3F..60F
+    HistStackScope    histStackScope  = HistStackScope::HitboxOnly;
     bool              hideMonster     = false;
     bool              showOverlay     = true;  // [\] / $show_overlay: Toggle 2D HUD banner, freeze pill & brackets
     bool              panelOpen       = false;
     int               panelPage       = 0; // 0=Main Filter & Scene, 1=Monster Parts Inspector
-    int               panelCursor     = 0; // 0..17 (Page 0)
+    int               panelCursor     = 0; // 0..22 (Page 0)
     int               partPanelCursor = 0; // 0..4+partCount (Page 1)
 };
 
@@ -165,6 +203,8 @@ struct ChatCommandConfig {
     std::string cmdFreeze      = "$full_freeze";   // I: Full Freeze / Resume
     std::string cmdWorldFreeze = "$ThE_WoRLD!!!";  // K: World Freeze / Resume
     std::string cmdStep        = "$step_frame";    // O: Step +1 frame
+    std::string cmdStepBack    = "$step_back";     // L: Step -1 frame in 3D hitbox history while frozen
+    std::string cmdHistStack   = "$hitbox_stack";  // ;: Cycle Multi-Frame Onion-Skin Stack window
     std::string cmdKeepHitbox  = "$keep_hitbox";   // J: Keep single-trigger hitboxes active
     std::string cmdPanel       = "$show_panel";    // P: Open / close Filter & Scene Panel
     std::string cmdOverlay     = "$show_overlay";  // \: Show / hide 2D HUD overlay & freeze banner
@@ -173,13 +213,15 @@ struct ChatCommandConfig {
 
 struct Config {
     bool enabled            = true;
-    int vkToggleVis         = 'U';   // 0x55: Toggle hitbox/hurtbox display
-    int vkToggleFreeze      = 'I';   // 0x49: Instant zero-delay full game freeze/resume
-    int vkFreezeOthers      = 'K';   // 0x4B: Pause everything except the Player (World Freeze)
-    int vkPersistHitbox     = 'J';   // 0x4A: Toggle keeping single-trigger hitboxes active while frozen
-    int vkStepFrame         = 'O';   // 0x4F: Advance 1 frame while frozen (Full or World Freeze)
-    int vkCycleFilter       = 'P';   // 0x50: Open/close interactive Filter & Scene Panel (Shift+P cycles preset)
-    int vkToggleOverlay     = 0xDC;  // VK_OEM_5 ('\'): Show/hide 2D HUD overlay for clean screenshots
+    int vkToggleVis         = 'U';       // 0x55: Toggle hitbox/hurtbox display
+    int vkToggleFreeze      = 'I';       // 0x49: Instant zero-delay full game freeze/resume
+    int vkFreezeOthers      = 'K';       // 0x4B: Pause everything except the Player (World Freeze)
+    int vkPersistHitbox     = 'J';       // 0x4A: Toggle keeping single-trigger hitboxes active while frozen
+    int vkStepFrame         = 'O';       // 0x4F: Advance 1 frame while frozen (Full or World Freeze)
+    int vkStepBack          = 'L';       // 0x4C: Step -1 frame in 3D history while frozen (Shift+L = jump to LIVE)
+    int vkHistStack         = 0xBA;      // VK_OEM_1 (';'): Cycle Multi-Frame Onion-Skin Stack window
+    int vkCycleFilter       = 'P';       // 0x50: Open/close interactive Filter & Scene Panel (Shift+P quick-cycles preset)
+    int vkToggleOverlay     = 0xDC;      // VK_OEM_5 ('\'): Show/hide 2D HUD overlay for clean screenshots
 
     bool startVisOn         = false; // Whether hitbox display starts ON automatically
     bool keepHitboxesActive = true;  // Keep single-trigger frozen hitboxes active & repeatable in World Freeze
@@ -206,6 +248,9 @@ struct Config {
     EmPartMode        startEmPartMode      = EmPartMode::Off;
     EmUnselectedStyle startEmUnsStyle      = EmUnselectedStyle::Hide;
     EmPartLabelMode   startEmLabelMode     = EmPartLabelMode::Full;
+    HistRecordMode    startHistRecMode     = HistRecordMode::LiveAndSteps;
+    int               startHistStackIdx    = 0;
+    HistStackScope    startHistStackScope  = HistStackScope::HitboxOnly;
 };
 
 void InitLog();
@@ -228,6 +273,8 @@ const char* SpecialSbcStyleName(SpecialSbcStyle s) noexcept;
 const char* EmPartModeName(EmPartMode m) noexcept;
 const char* EmUnselectedStyleName(EmUnselectedStyle s) noexcept;
 const char* EmPartLabelModeName(EmPartLabelMode l) noexcept;
+const char* HistRecordModeName(HistRecordMode m) noexcept;
+const char* HistStackScopeName(HistStackScope s) noexcept;
 
 bool Readable(std::uintptr_t addr, std::size_t len);
 
